@@ -1,58 +1,90 @@
-ThingPulse Pendrive S3 - Wireless USB Disk
-==========================================
+# Flying Thumb v2
 
-This code is made for the Pendrive S3: https://thingpulse.com/product/esp32-s3-pendrive-s3-128mb/
+Flying Thumb turns a **LILYGO T-Dongle-S3** and microSD card into a Wi-Fi-managed USB drive. Version 2 adds automatic shop-wide discovery and the native Flying Thumb Manager for Windows.
 
-# What Does It Do?
+## What is included
 
-After plugin the device into a computer it will mount like a regular
-memory stick. At the same time it starts a WiFi Access Point
-with a webserver. A user can then access the files stored on the 
-memory stick over this web interface.
+- USB mass storage backed by the built-in microSD slot
+- Browser upload, download, and deletion
+- Setup hotspot and WPS provisioning
+- Five-second button hold to forget Wi-Fi
+- Friendly machine names such as `LongArm-1`
+- A permanent hardware-derived device ID
+- mDNS service advertisement at `_flyingthumb._tcp.local`
+- UDP discovery on port 4210 for reliable Windows discovery
+- Shop-key protection for uploads, deletes, renaming, and restarts
+- Batch upload support that reconnects USB only after the complete batch
+- A self-contained Windows manager for discovery, bulk upload, folder sync, and renaming
 
+## First installation and USB recovery
 
+Run **`dist/manager/FlyingThumbManager.exe`** and choose **Install / Recover USB**. The manager walks through the button-hold insertion, detects the recovery COM port, and writes the complete firmware image. It requires no Python, PlatformIO, VS Code, or internet connection and does not format or erase the microSD card.
 
-# How To Build & Flash
+Use this same path to recover a dongle locally if a wireless firmware upgrade is interrupted or the installed firmware cannot boot. The separate **`Flash Flying Thumb.cmd`** development script remains available as a backup on a development PC.
+## Set up each dongle
 
-1. Checkout this repository with git
-2. Open with VS Code
-3. Setup Platformio for VS Code
-4. Build and upload the sample
+1. Insert a FAT32 or exFAT microSD card and flash the firmware.
+2. Join the `FlyingThumb-XXXX` network using password `flyingthumb`.
+3. Open `http://192.168.77.1`. Windows can keep its wired connection active; this less-common setup range avoids most office-network address conflicts.
+4. Give it a meaningful machine name, enter the machine's Wi-Fi credentials, and enter your shop management key.
+5. Use the same management key for every dongle that should be managed together.
 
+After restarting, the setup hotspot turns off. The display shows the friendly machine name and IP address but never the joined Wi-Fi name.
 
-# How To Use
+A short button press starts WPS. Holding the button for five seconds erases the stored Wi-Fi network and returns the device to setup mode. The device name and management key are retained.
 
-## Accessing Files Over the Web Interface
+## Flying Thumb Manager
 
-When the device is plugged in it will mount a mass storage device with
-about 120MB of space. At the same time it starts a WiFi Access Point
-`wireless-usb-disk` with password `12345678`. By connecting to this access
-point the files on the memory stick can be accessed in the browser: http://192.168.4.1
+The manager is organized around everyday file work. Select devices, then drag files anywhere onto the window or choose **Add Files to Selected**. This distributes files immediately without requiring the drives to be synchronized.
 
-The Web View:
-![Web Interface](assets/images/WebInterface.png)
+The **Files across all drives** view shows the additive union of filenames and creates one status/size column per discovered drive. Missing files show `—`; present files show their size. Same-name files with different sizes are marked as conflicts.
 
-The Data On the Memory Stick:
-![Memory Stick](assets/images/MemoryStick.png)
+Choose **Sync Across Selected** to copy missing, non-conflicting files among the selected drives until they share the same additive library. Synchronization never deletes files. Conflicts are not overwritten and are reported in the activity log.
 
-## Uploading & Deleting Files
+Discovery, renaming, update checks, and USB installation/recovery live in the **File** and **Devices** menus. The manager checks for updates after discovering drives and also provides **File > Check for Updates**. When an update is available, choose **Update Now**; a typical drive update takes about five seconds.
+## Automatic update checks
 
-You can delete and upload files over the web interface as well. Please note that changing 
-files over the web interface will restart the device to make the changes visible on the host
-computer.
+The first installation uses the USB button-hold installer. After that, the manager checks GitHub Releases after discovering drives and compares each discovered drive with the latest available software. It only displays an update notice when something can be updated. Choose **Update Now** to update every discovered outdated drive; a typical drive update takes about five seconds. Wi-Fi credentials, friendly names, shop keys, and microSD files are retained.
 
-## Settings
+Use **File > Check for Updates** to check manually. Downloads are delivered over HTTPS and verified against the SHA-256 values in the release manifest before installation.
+## Removable demo drives
 
-By clicking on the `Settings` link you can change the WiFi settings of the device.
-![Settings](assets/images/Settings.png)
+Run **`scripts/create-demo-drives.ps1`** to create a local `demo-drives` folder containing three folder-backed simulated drives. The manager discovers them through a separate discovery provider and accesses them through the same `FlyingThumbClient` API used for real network devices. The UI, file matrix, drag-and-drop distribution, and additive synchronization therefore use the same application logic in both cases.
 
- * Mode: AP (Access Point), STA (Device connects to access point), AP + STA (both)
- * AP SSID/ Password: credentials of the access point the device will start in AP mode
- * STA SSID/ Password: credentials of the WiFi network where the device will connect to in STA mode
+The sample set includes shared files, machine-specific files, missing-file cases, and a deliberate `Shared Shop Notes.txt` conflict. The generated folder is intentionally excluded from Git so real test files are never published accidentally. Delete the single `demo-drives` folder to remove and disable every simulated drive; no source or configuration change is required.
+## Firmware files
 
-## LED
+- `dist/FlyingThumb-v2-full.bin` is the complete image for flashing at address `0x0`.
+- `dist/FlyingThumb-v2-wifi-update.bin` is the wireless drive-software update image.
 
-The color of the LED changes when the host computer reads or writes to the device:
- * Red (50, 0, 0) when the host computer writes
- * Green (0, 50, 0) when the host reads
- * Brown (50, 50, 0) when there were read and write operations in the last 0.5s
+To build or upload through PlatformIO:
+
+```powershell
+py -3 -m platformio run
+py -3 -m platformio run --target upload
+```
+
+To rebuild the manager:
+
+```powershell
+dotnet build manager/FlyingThumbManager.csproj -c Release
+```
+
+## Network protocol
+
+Managers broadcast the ASCII message `FLYINGTHUMB_DISCOVER_V1` to UDP port `4210`. Each dongle replies directly with its JSON identity, friendly name, address, firmware version, free space, and enrollment state. Devices also advertise `_flyingthumb._tcp.local` over mDNS.
+
+Mutating HTTP requests use the `X-FlyingThumb-Key` header. Credentials and management keys are never included in discovery responses.
+
+## Storage safety
+
+USB hosts cache filesystem state. For a remote file change, Flying Thumb temporarily disconnects only its USB data connection, completes the entire batch, then reconnects USB once so the attached machine rereads the card. Wi-Fi and the display remain running. Do not modify files while the attached machine is actively reading or writing; use its eject or unmount function whenever one is available.
+
+## Activity LED
+
+- Blue: idle
+- Green: USB read
+- Red: USB write
+- Yellow: recent read and write
+
+The hardware pin assignments follow LILYGO's official T-Dongle-S3 documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.

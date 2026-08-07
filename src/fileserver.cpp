@@ -1,0 +1,78 @@
+#include "fileserver.h"
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
+#include <SD_MMC.h>
+#include <Update.h>
+#include <WebServer.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <esp_wps.h>
+#include <esp_ota_ops.h>
+#include "board_config.h"
+#include "display.h"
+#include "ota_health.h"
+#include "usb_disk.h"
+
+extern const uint8_t index_html_start[] asm("_binary_web_index_html_start");
+extern const uint8_t index_html_end[] asm("_binary_web_index_html_end");
+extern const uint8_t settings_html_start[] asm("_binary_web_settings_html_start");
+extern const uint8_t settings_html_end[] asm("_binary_web_settings_html_end");
+
+namespace {
+constexpr uint16_t DISCOVERY_PORT=4210;
+constexpr uint16_t DNS_PORT=53;
+constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
+constexpr char FIRMWARE_VERSION_BASE[]="2.1.4";
+const IPAddress SETUP_IP(192,168,77,1);
+const IPAddress SETUP_MASK(255,255,255,0);
+WebServer server(80); DNSServer dns; WiFiUDP discovery; Preferences prefs; File uploadFile;
+String savedSsid,savedPassword,setupSsid,deviceId,deviceName,managementKey,uploadPath,uploadError;
+bool restartPending=false; bool firmwareUploadOk=false; bool uploadOk=false; bool setupDnsActive=false; bool fileBatchActive=false; bool standaloneUsbUpdate=false; size_t uploadBytes=0; uint32_t restartAt=0,fileBatchTouchedAt=0;
+
+String makeDeviceId(){char v[10];snprintf(v,sizeof(v),"FT-%06X",(uint32_t)(ESP.getEfuseMac()&0xffffff));return String(v);}
+String makeHostName(){String h="flyingthumb-"+deviceId.substring(3);h.toLowerCase();return h;}
+String safePath(String p){p=server.urlDecode(p);if(!p.startsWith("/"))p="/"+p;if(p.indexOf("..")>=0||p.indexOf('\\')>=0)return String();return p;}
+String uploadName(String n){int extended=n.indexOf("filename*=");if(extended>=0){n=n.substring(extended+10);int encoded=n.indexOf("''");if(encoded>=0)n=n.substring(encoded+2);}else{int extra=n.indexOf("\";");if(extra>=0)n=n.substring(0,extra);}n.replace("\"","");n.trim();return n;}
+bool authorized(){return !managementKey.length()||(server.hasHeader("X-FlyingThumb-Key")&&server.header("X-FlyingThumb-Key")==managementKey);}
+bool storageReady(){return SD_MMC.cardType()!=CARD_NONE&&SD_MMC.totalBytes()>0;}
+String firmwareVersion(){const esp_partition_t*p=esp_ota_get_running_partition();String suffix="-?";if(p){String label=p->label;if(label=="app0")suffix="-A";else if(label=="app1")suffix="-B";}return String(FIRMWARE_VERSION_BASE)+suffix;}
+bool requireAuth(){if(authorized())return true;server.send(401,"application/json","{\"error\":\"invalid management key\"}");return false;}
+void saveNetwork(const String&s,const String&p){prefs.begin("network",false);prefs.putString("ssid",s);prefs.putString("password",p);prefs.end();}
+void saveDevice(){prefs.begin("device",false);prefs.putString("name",deviceName);prefs.putString("key",managementKey);prefs.end();}
+void scheduleRestart(){restartPending=true;restartAt=millis()+900;}
+void finishStandaloneUsbUpdate(){if(standaloneUsbUpdate){standaloneUsbUpdate=false;finishUsbFileUpdate();}}
+void beginFileBatch(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}if(!fileBatchActive&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not be paused\"}");return;}fileBatchActive=true;fileBatchTouchedAt=millis();server.send(200,"application/json","{\"status\":\"batch-ready\"}");}
+void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;server.send(200,"application/json","{\"status\":\"usb-reconnecting\"}");finishUsbFileUpdate();}
+void showConnected(){String ip=WiFi.localIP().toString(),status="USB / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}
+void startDiscovery(){String h=makeHostName(),version=firmwareVersion();if(MDNS.begin(h.c_str())){MDNS.addService("flyingthumb","tcp",80);MDNS.addServiceTxt("flyingthumb","tcp","id",deviceId.c_str());MDNS.addServiceTxt("flyingthumb","tcp","name",deviceName.c_str());MDNS.addServiceTxt("flyingthumb","tcp","version",version.c_str());}discovery.begin(DISCOVERY_PORT);}
+void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
+void onWifiEvent(WiFiEvent_t e){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS){esp_wifi_wps_disable();WiFi.begin();delay(100);savedSsid=WiFi.SSID();savedPassword=WiFi.psk();saveNetwork(savedSsid,savedPassword);}else if(e==ARDUINO_EVENT_WPS_ER_FAILED||e==ARDUINO_EVENT_WPS_ER_TIMEOUT){esp_wifi_wps_disable();displayMessage("WPS FAILED","Short press","to retry");}}
+void sendIndex(){if(WiFi.getMode()==WIFI_AP){server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);return;}server.send_P(200,"text/html",(const char*)index_html_start,index_html_end-index_html_start);}
+void sendSettings(){server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);}
+void sendCaptivePortal(){server.sendHeader("Cache-Control","no-store");server.sendHeader("Location","http://192.168.77.1/",true);server.send(302,"text/plain","Open Flying Thumb Setup");}
+void sendWindowsConnectTest(){server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain","Microsoft Connect Test");}
+void sendLegacyWindowsConnectTest(){server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain","Microsoft NCSI");}
+void fillInfo(JsonDocument&d){bool ready=storageReady();uint64_t total=ready?SD_MMC.totalBytes():0,used=ready?SD_MMC.usedBytes():0;d["service"]="flyingthumb";d["protocol"]=1;d["id"]=deviceId;d["name"]=deviceName;d["ip"]=WiFi.getMode()==WIFI_AP?WiFi.softAPIP().toString():WiFi.localIP().toString();d["port"]=80;d["firmware"]=firmwareVersion();d["storageReady"]=ready;d["storageTotal"]=total;d["storageFree"]=total-used;d["claimed"]=managementKey.length()>0;d["setupMode"]=WiFi.getMode()==WIFI_AP;}
+void deviceInfo(){JsonDocument d;fillInfo(d);String j;serializeJson(d,j);server.send(200,"application/json",j);}
+void listFiles(){if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.hasArg("dir")?server.arg("dir"):"/");if(!p.length()){server.send(400,"application/json","[]");return;}File root=SD_MMC.open(p);JsonDocument d;JsonArray a=d.to<JsonArray>();if(root&&root.isDirectory()){File f=root.openNextFile();while(f){if(f.name()[0]!='.'){JsonObject i=a.add<JsonObject>();i["type"]=f.isDirectory()?"dir":"file";i["name"]=f.name();i["size"]=f.size();}f.close();f=root.openNextFile();}}String j;serializeJson(d,j);server.send(200,"application/json",j);}
+void diskInfo(){if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\",\"storageReady\":false}");return;}JsonDocument d;d["storageReady"]=true;d["total"]=SD_MMC.totalBytes();d["used"]=SD_MMC.usedBytes();d["free"]=SD_MMC.totalBytes()-SD_MMC.usedBytes();d["cardType"]="SD";d["cardSize"]=SD_MMC.cardSize();String j;serializeJson(d,j);server.send(200,"application/json",j);}
+void deleteFile(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.arg("dir"));if(!p.length()||p=="/"){server.send(400,"text/plain","Invalid path");return;}if(!SD_MMC.exists(p)){server.send(404,"text/plain","Not found");return;}bool ownUsb=!fileBatchActive;if(ownUsb&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not be paused\"}");return;}bool ok=SD_MMC.remove(p);server.send(ok?200:500,"application/json",ok?"{\"status\":\"usb-reconnecting\"}":"{\"error\":\"delete failed\"}");if(ownUsb)finishUsbFileUpdate();}
+void upload(){if(!authorized())return;HTTPUpload&r=server.upload();if(r.status==UPLOAD_FILE_START){uploadOk=false;uploadBytes=0;uploadError="";uploadPath=safePath(uploadName(r.filename));standaloneUsbUpdate=!fileBatchActive;if(standaloneUsbUpdate&&!beginUsbFileUpdate())uploadError="USB storage could not be paused";if(fileBatchActive)fileBatchTouchedAt=millis();if(!storageReady())uploadError="TF card became unavailable";else if(!uploadPath.length())uploadError="invalid destination filename";else if(!uploadError.length()){uploadFile=SD_MMC.open(uploadPath,FILE_WRITE);uploadOk=bool(uploadFile);if(!uploadOk)uploadError="could not create "+uploadPath;}}else if(r.status==UPLOAD_FILE_WRITE){if(fileBatchActive)fileBatchTouchedAt=millis();if(!uploadFile){uploadOk=false;if(!uploadError.length())uploadError="destination file is not open";}else{size_t written=uploadFile.write(r.buf,r.currentSize);uploadBytes+=written;if(written!=r.currentSize){uploadOk=false;uploadError="short write to "+uploadPath+": "+String(written)+" of "+String(r.currentSize)+" bytes";}}}else if(r.status==UPLOAD_FILE_END){if(uploadFile)uploadFile.close();if(uploadBytes!=r.totalSize){uploadOk=false;if(!uploadError.length())uploadError="incomplete upload to "+uploadPath+": "+String(uploadBytes)+" of "+String(r.totalSize)+" bytes";}if(uploadOk){File verify=SD_MMC.open(uploadPath,FILE_READ);if(!verify||verify.size()!=uploadBytes){uploadOk=false;uploadError="written file failed verification: "+uploadPath;}if(verify)verify.close();}}else if(r.status==UPLOAD_FILE_ABORTED){uploadOk=false;uploadError="upload was aborted";if(uploadFile)uploadFile.close();}}
+void finishUpload(){if(!requireAuth()){finishStandaloneUsbUpdate();return;}if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");finishStandaloneUsbUpdate();return;}if(!uploadOk){JsonDocument d;d["error"]=uploadError.length()?uploadError:"file could not be written";String j;serializeJson(d,j);server.send(500,"application/json",j);finishStandaloneUsbUpdate();return;}server.send(200,"application/json",fileBatchActive?"{\"status\":\"uploaded\"}":"{\"status\":\"usb-reconnecting\"}");finishStandaloneUsbUpdate();}
+void firmwareUpload(){if(!authorized())return;HTTPUpload&r=server.upload();if(r.status==UPLOAD_FILE_START){firmwareUploadOk=Update.begin(UPDATE_SIZE_UNKNOWN);}else if(r.status==UPLOAD_FILE_WRITE){if(firmwareUploadOk&&Update.write(r.buf,r.currentSize)!=r.currentSize)firmwareUploadOk=false;}else if(r.status==UPLOAD_FILE_END){firmwareUploadOk=firmwareUploadOk&&Update.end(true);}else if(r.status==UPLOAD_FILE_ABORTED){Update.abort();firmwareUploadOk=false;}}
+void finishFirmwareUpload(){if(!requireAuth())return;if(!firmwareUploadOk){server.send(500,"application/json","{\"error\":\"firmware validation or write failed\"}");return;}rememberOtaRequirements(storageReady());server.send(200,"application/json","{\"status\":\"upgrading\"}");scheduleRestart();}
+void restartDevice(){if(!requireAuth())return;server.send(200,"application/json","{\"status\":\"restarting\"}");scheduleRestart();}
+void saveSetup(){if(WiFi.getMode()!=WIFI_AP&&!requireAuth())return;if(!server.hasArg("plain")){server.send(400,"application/json","{\"error\":\"missing body\"}");return;}JsonDocument d;if(deserializeJson(d,server.arg("plain"))){server.send(400,"application/json","{\"error\":\"invalid JSON\"}");return;}String ssid=d["ssid"]|"",pass=d["password"]|"",name=d["name"]|deviceName,key=d["key"]|managementKey;ssid.trim();name.trim();key.trim();if(!ssid.length()){server.send(400,"application/json","{\"error\":\"Wi-Fi name required\"}");return;}if(!name.length())name=deviceId;deviceName=name.substring(0,31);managementKey=key.substring(0,63);saveDevice();saveNetwork(ssid,pass);server.send(200,"application/json","{\"status\":\"saved\"}");scheduleRestart();}
+void updateDevice(){if(!requireAuth())return;JsonDocument d;if(!server.hasArg("plain")||deserializeJson(d,server.arg("plain"))){server.send(400,"application/json","{\"error\":\"invalid JSON\"}");return;}String name=d["name"]|deviceName,key=d["key"]|managementKey;name.trim();key.trim();if(name.length())deviceName=name.substring(0,31);managementKey=key.substring(0,63);saveDevice();server.send(200,"application/json","{\"status\":\"saved\"}");scheduleRestart();}
+void downloadOr404(){String p=safePath(server.uri());if(p=="/"||!p.length()){sendIndex();return;}if(p=="/settings.html"){sendSettings();return;}if(WiFi.getMode()==WIFI_AP){sendCaptivePortal();return;}if(p.length()&&SD_MMC.exists(p)){File f=SD_MMC.open(p,FILE_READ);server.streamFile(f,"application/octet-stream");f.close();return;}server.send(404,"text/plain","Not found");}
+void startServer(){const char*h[]={"X-FlyingThumb-Key"};server.collectHeaders(h,1);server.on("/",HTTP_GET,sendIndex);server.on("/settings.html",HTTP_GET,sendSettings);server.on("/connecttest.txt",HTTP_GET,sendWindowsConnectTest);server.on("/ncsi.txt",HTTP_GET,sendLegacyWindowsConnectTest);server.on("/redirect",HTTP_GET,sendCaptivePortal);server.on("/generate_204",HTTP_GET,sendCaptivePortal);server.on("/gen_204",HTTP_GET,sendCaptivePortal);server.on("/hotspot-detect.html",HTTP_GET,sendCaptivePortal);server.on("/library/test/success.html",HTTP_GET,sendCaptivePortal);server.on("/api/device",HTTP_GET,deviceInfo);server.on("/api/device",HTTP_POST,updateDevice);server.on("/api/list",HTTP_GET,listFiles);server.on("/api/disk",HTTP_GET,diskInfo);server.on("/api/setup",HTTP_POST,saveSetup);server.on("/api/files/begin",HTTP_POST,beginFileBatch);server.on("/api/files/commit",HTTP_POST,commitFileBatch);server.on("/delete",HTTP_POST,deleteFile);server.on("/upload",HTTP_POST,finishUpload,upload);server.on("/api/firmware",HTTP_POST,finishFirmwareUpload,firmwareUpload);server.on("/api/restart",HTTP_POST,restartDevice);server.onNotFound(downloadOr404);server.begin();}
+void handleDiscovery(){int n=discovery.parsePacket();if(!n)return;char q[64]={};int len=discovery.read(q,sizeof(q)-1);if(len<=0||String(q)!=DISCOVERY_REQUEST)return;JsonDocument d;fillInfo(d);String j;serializeJson(d,j);discovery.beginPacket(discovery.remoteIP(),discovery.remotePort());discovery.write((const uint8_t*)j.c_str(),j.length());discovery.endPacket();}
+}
+
+void clearNetworkSettings(){prefs.begin("network",false);prefs.clear();prefs.end();WiFi.disconnect(true,true);}
+void beginWpsPairing(){WiFi.mode(WIFI_STA);WiFi.disconnect();esp_wps_config_t c=WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);bool ok=esp_wifi_wps_enable(&c)==ESP_OK&&esp_wifi_wps_start(0)==ESP_OK;if(!ok)displayMessage("WPS FAILED","Use setup page","instead");}
+void initNetworkAndServer(){deviceId=makeDeviceId();prefs.begin("device",true);deviceName=prefs.getString("name",deviceId);managementKey=prefs.getString("key","");prefs.end();prefs.begin("network",true);savedSsid=prefs.getString("ssid","");savedPassword=prefs.getString("password","");prefs.end();WiFi.onEvent(onWifiEvent);if(!savedSsid.length()){startSetupAp();startDiscovery();}else{WiFi.mode(WIFI_STA);WiFi.setHostname(makeHostName().c_str());WiFi.begin(savedSsid.c_str(),savedPassword.c_str());displayMessage(deviceName.c_str(),"Connecting...","");uint32_t start=millis();while(WiFi.status()!=WL_CONNECTED&&millis()-start<STA_CONNECT_TIMEOUT_MS)delay(100);if(WiFi.status()==WL_CONNECTED)showConnected();else displayMessage("WIFI OFFLINE","Short: WPS","Hold: reset");}startServer();}
+void handleNetworkAndServer(){if(setupDnsActive)dns.processNextRequest();server.handleClient();handleDiscovery();if(fileBatchActive&&millis()-fileBatchTouchedAt>120000){fileBatchActive=false;finishUsbFileUpdate();}if(restartPending&&millis()>=restartAt)ESP.restart();}

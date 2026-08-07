@@ -4,3 +4,11 @@
 .vscode/launch.json
 .vscode/ipch
 .DS_Store
+
+manager/bin/
+manager/obj/
+dist/
+work/
+flash-log.txt
+release/
+demo-drives/
