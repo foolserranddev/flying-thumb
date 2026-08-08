@@ -20,6 +20,7 @@ public sealed class MainForm : Form
     readonly Button addButton = new() { Text = "Add files", AutoSize = true };
     readonly Button syncButton = new() { Text = "Sync...", AutoSize = true };
     readonly Button refreshFilesButton = new() { Text = "Refresh", AutoSize = true };
+    readonly Button deleteFilesButton = new() { Text = "Delete", AutoSize = true, Enabled = false };
     readonly Button updateNowButton = new() { Text = "Update Now", AutoSize = true };
     readonly Label updateNotice = new() { AutoSize = true, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(8, 8, 12, 8) };
     readonly FlowLayoutPanel updateBanner = new() { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Visible = false, BackColor = Color.FromArgb(255, 244, 204), Padding = new Padding(8, 4, 8, 4), Margin = new Padding(10, 2, 10, 6) };
@@ -28,6 +29,7 @@ public sealed class MainForm : Form
     readonly System.Windows.Forms.Timer setupNetworkTimer = new() { Interval = 1500 };
     readonly Dictionary<string, List<RemoteFile>> inventories = new(StringComparer.OrdinalIgnoreCase);
     readonly HashSet<string> checkedFiles = new(StringComparer.OrdinalIgnoreCase);
+    CheckBoxHeaderCell? fileCheckHeader;
     bool renderingFileMatrix;
     bool busy;
     bool adjustingSplit;
@@ -71,7 +73,7 @@ public sealed class MainForm : Form
             ForeColor = Color.FromArgb(65, 65, 65),
             BorderStyle = BorderStyle.FixedSingle,
             Padding = new Padding(8, 6, 8, 6),
-            Margin = new Padding(10, 0, 10, 6),
+            Margin = new Padding(0, 0, 0, 6),
             AutoEllipsis = true
         };
         var buttonFlow = new FlowLayoutPanel
@@ -82,9 +84,9 @@ public sealed class MainForm : Form
             WrapContents = false,
             FlowDirection = FlowDirection.LeftToRight,
             Margin = new Padding(0),
-            Padding = new Padding(10, 6, 10, 4)
+            Padding = new Padding(0, 0, 0, 4)
         };
-        foreach (var button in new[] { addButton, syncButton, refreshFilesButton })
+        foreach (var button in new[] { addButton, syncButton, refreshFilesButton, deleteFilesButton })
         {
             button.AutoSize = true;
             button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -92,27 +94,11 @@ public sealed class MainForm : Form
             button.Padding = new Padding(8, 2, 8, 2);
             button.Margin = new Padding(0, 0, 6, 0);
         }
-        buttonFlow.Controls.AddRange([addButton, syncButton, refreshFilesButton]);
+        buttonFlow.Controls.AddRange([addButton, syncButton, refreshFilesButton, deleteFilesButton]);
         updateNowButton.Margin = new Padding(0, 2, 0, 2);
         updateBanner.Controls.Add(updateNotice);
         updateBanner.Controls.Add(updateNowButton);
-        var actions = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 1,
-            RowCount = 3,
-            Margin = new Padding(0),
-            Padding = new Padding(0)
-        };
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        actions.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        actions.Controls.Add(buttonFlow, 0, 0);
-        actions.Controls.Add(dropHint, 0, 1);
-        actions.Controls.Add(updateBanner, 0, 2);
+
         ConfigureDeviceGrid();
         ConfigureFileGrid();
         var fileTab = new TabPage("Files across all drives") { Padding = new Padding(4), BackColor = Color.White };
@@ -120,20 +106,29 @@ public sealed class MainForm : Form
         var activityTab = new TabPage("Activity log") { Padding = new Padding(4), BackColor = Color.White };
         activityTab.Controls.Add(log);
         tabs.TabPages.Add(fileTab); tabs.TabPages.Add(activityTab);
+        var fileArea = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(0), Padding = new Padding(0) };
+        fileArea.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        fileArea.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        fileArea.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        fileArea.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        fileArea.Controls.Add(buttonFlow, 0, 1);
+        fileArea.Controls.Add(dropHint, 0, 0);
+        fileArea.Controls.Add(tabs, 0, 2);
 
         split.Dock = DockStyle.Fill; split.Orientation = Orientation.Horizontal; split.SplitterWidth = 6;
         split.Panel1.Padding = new Padding(10, 0, 10, 5); split.Panel1.Controls.Add(deviceGrid);
-        split.Panel2.Padding = new Padding(10, 5, 10, 5); split.Panel2.Controls.Add(tabs);
+        split.Panel2.Padding = new Padding(10, 5, 10, 5); split.Panel2.Controls.Add(fileArea);
         summary.Spring = true; summary.TextAlign = ContentAlignment.MiddleLeft;
         var status = new StatusStrip { BackColor = Color.FromArgb(245, 245, 245), SizingGrip = true }; status.Items.AddRange([summary, transferDetail, transferProgress]);
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.Controls.Add(menu, 0, 0); root.Controls.Add(actions, 0, 1); root.Controls.Add(split, 0, 2); root.Controls.Add(status, 0, 3);
+        root.Controls.Add(menu, 0, 0); root.Controls.Add(updateBanner, 0, 1); root.Controls.Add(split, 0, 2); root.Controls.Add(status, 0, 3);
         Controls.Add(root); MainMenuStrip = menu;
 
         addButton.Click += async (_, _) => await ChooseAndAddFiles();
         syncButton.Click += async (_, _) => await ChooseAndSync();
         refreshFilesButton.Click += async (_, _) => await RefreshFileMatrix();
+        deleteFilesButton.Click += async (_, _) => await DeleteSelectedFiles();
         updateNowButton.Click += async (_, _) => await InstallAvailableUpdates();
         DragEnter += (_, e) => { if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy; };
         DragDrop += async (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddFiles(paths.Where(File.Exists).ToArray()); };
@@ -212,7 +207,7 @@ public sealed class MainForm : Form
     {
         if (adjustingSplit || !split.IsHandleCreated) return;
         const int deviceFloor = 110;
-        const int fileFloor = 160;
+        const int fileFloor = 220;
         var available = split.ClientSize.Height;
         if (available < deviceFloor + fileFloor + split.SplitterWidth) return;
 
@@ -319,10 +314,13 @@ public sealed class MainForm : Form
             if (renderingFileMatrix || e.RowIndex < 0 || e.ColumnIndex < 0 || e.ColumnIndex >= fileGrid.Columns.Count || fileGrid.Columns[e.ColumnIndex].Name != "FileChecked") return;
             var row = fileGrid.Rows[e.RowIndex]; var name = row.Cells["FileName"].Value?.ToString(); if (string.IsNullOrWhiteSpace(name)) return;
             if (row.Cells["FileChecked"].Value is true) checkedFiles.Add(name); else checkedFiles.Remove(name);
+            UpdateFileCheckHeader();
+            UpdateFileActionButtons();
             summary.Text = checkedFiles.Count == 0 ? "No files checked; Sync applies to all files" : $"{checkedFiles.Count} file(s) checked for file actions";
         };
         fileGrid.CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0) { if (checkedFiles.Count == 0 && !fileGrid.Rows[e.RowIndex].Selected) { fileGrid.ClearSelection(); fileGrid.Rows[e.RowIndex].Selected = true; } fileGrid.CurrentCell = fileGrid.Rows[e.RowIndex].Cells["FileName"]; } };
         fileGrid.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Delete && !busy) { e.Handled = true; e.SuppressKeyPress = true; await DeleteSelectedFiles(); } };
+        fileGrid.SelectionChanged += (_, _) => UpdateFileActionButtons();
     }
 
     static bool FirmwareAtLeast(Device device, int major, int minor, int build)
@@ -396,12 +394,41 @@ public sealed class MainForm : Form
             .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => Path.GetFileName(name!))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
+    void ToggleAllFiles()
+    {
+        if (busy || fileGrid.Rows.Count == 0) return;
+        var checkAll = fileCheckHeader?.HeaderCheckState != CheckState.Checked;
+        renderingFileMatrix = true;
+        foreach (DataGridViewRow row in fileGrid.Rows)
+        {
+            row.Cells["FileChecked"].Value = checkAll;
+            var name = row.Cells["FileName"].Value?.ToString();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            if (checkAll) checkedFiles.Add(name); else checkedFiles.Remove(name);
+        }
+        renderingFileMatrix = false;
+        UpdateFileCheckHeader();
+        UpdateFileActionButtons();
+        fileGrid.Refresh();
+        summary.Text = checkAll ? $"All {fileGrid.Rows.Count} file(s) checked" : "All file checks cleared; Sync applies to all files";
+    }
+    void UpdateFileCheckHeader()
+    {
+        if (fileCheckHeader is null) return;
+        var total = fileGrid.Rows.Count;
+        var selected = fileGrid.Rows.Cast<DataGridViewRow>().Count(row => row.Cells["FileChecked"].Value is true);
+        fileCheckHeader.SetState(selected == 0 ? CheckState.Unchecked : selected == total ? CheckState.Checked : CheckState.Indeterminate);
+    }
+    void UpdateFileActionButtons()
+    {
+        deleteFilesButton.Enabled = !busy && (checkedFiles.Count > 0 || fileGrid.SelectedRows.Count > 0);
+    }
     void SelectAll(bool selected) { foreach (var d in devices) d.Selected = selected; deviceGrid.Refresh(); RenderFileMatrix(); }
     void WriteLog(string message) { if (InvokeRequired) { BeginInvoke(() => WriteLog(message)); return; } log.AppendText($"{DateTime.Now:t}  {message}{Environment.NewLine}"); }
     void SetBusy(bool value)
     {
         busy = value;
-        addButton.Enabled = syncButton.Enabled = refreshFilesButton.Enabled = updateNowButton.Enabled = !value;
+        addButton.Enabled = syncButton.Enabled = refreshFilesButton.Enabled = deleteFilesButton.Enabled = updateNowButton.Enabled = !value;
         UseWaitCursor = value;
         Cursor = value ? Cursors.WaitCursor : Cursors.Default;
         deviceGrid.UseWaitCursor = value;
@@ -410,6 +437,7 @@ public sealed class MainForm : Form
         {
             deviceGrid.Cursor = Cursors.Default;
             fileGrid.Cursor = Cursors.Default;
+            UpdateFileActionButtons();
         }
     }
     void SetStatus(Device device, string status) { if (InvokeRequired) { BeginInvoke(() => SetStatus(device, status)); return; } device.Status = status; deviceGrid.Refresh(); summary.Text = $"{device.Name}: {status}"; }
@@ -552,7 +580,9 @@ public sealed class MainForm : Form
         fileGrid.SuspendLayout();
         fileGrid.Columns.Clear();
         fileGrid.Rows.Clear();
-        fileGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "FileChecked", HeaderText = "", ReadOnly = false, Width = 46, MinimumWidth = 46, AutoSizeMode = DataGridViewAutoSizeColumnMode.None, SortMode = DataGridViewColumnSortMode.NotSortable });
+        fileCheckHeader = new CheckBoxHeaderCell { ToolTipText = "Check or uncheck all files" };
+        fileCheckHeader.ToggleRequested += (_, _) => ToggleAllFiles();
+        fileGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "FileChecked", HeaderText = "", HeaderCell = fileCheckHeader, ReadOnly = false, Width = 46, MinimumWidth = 46, AutoSizeMode = DataGridViewAutoSizeColumnMode.None, SortMode = DataGridViewColumnSortMode.NotSortable });
         fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FileName", HeaderText = "File", ReadOnly = true, FillWeight = 150 });
         fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Overall", HeaderText = "Overall", ReadOnly = true, FillWeight = 65 });
         foreach (var d in shown) fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = d.Name, ReadOnly = true, FillWeight = 75 });
@@ -568,6 +598,8 @@ public sealed class MainForm : Form
         }
         fileGrid.ResumeLayout();
         renderingFileMatrix = false;
+        UpdateFileCheckHeader();
+        UpdateFileActionButtons();
         tabs.SelectedIndex = 0;
         summary.Text = shown.Length == 0 ? "No drives included" : $"Showing {fileGrid.Rows.Count} unique file(s) across {shown.Length} included drive(s)";
     }
@@ -1079,6 +1111,40 @@ public sealed class MainForm : Form
     }
 }
 
+sealed class CheckBoxHeaderCell : DataGridViewColumnHeaderCell
+{
+    public CheckState HeaderCheckState { get; private set; } = CheckState.Unchecked;
+    public event EventHandler? ToggleRequested;
+
+    public void SetState(CheckState state)
+    {
+        if (HeaderCheckState == state) return;
+        HeaderCheckState = state;
+        DataGridView?.InvalidateCell(this);
+    }
+
+    protected override void OnMouseClick(DataGridViewCellMouseEventArgs e)
+    {
+        base.OnMouseClick(e);
+        if (e.Button == MouseButtons.Left) ToggleRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    protected override void Paint(Graphics graphics, Rectangle clipBounds, Rectangle cellBounds, int rowIndex,
+        DataGridViewElementStates dataGridViewElementState, object? value, object? formattedValue, string? errorText,
+        DataGridViewCellStyle cellStyle, DataGridViewAdvancedBorderStyle advancedBorderStyle, DataGridViewPaintParts paintParts)
+    {
+        base.Paint(graphics, clipBounds, cellBounds, rowIndex, dataGridViewElementState, value, formattedValue, errorText, cellStyle, advancedBorderStyle, paintParts);
+        var visualState = HeaderCheckState switch
+        {
+            CheckState.Checked => System.Windows.Forms.VisualStyles.CheckBoxState.CheckedNormal,
+            CheckState.Indeterminate => System.Windows.Forms.VisualStyles.CheckBoxState.MixedNormal,
+            _ => System.Windows.Forms.VisualStyles.CheckBoxState.UncheckedNormal
+        };
+        var size = CheckBoxRenderer.GetGlyphSize(graphics, visualState);
+        var point = new Point(cellBounds.Left + (cellBounds.Width - size.Width) / 2, cellBounds.Top + (cellBounds.Height - size.Height) / 2);
+        CheckBoxRenderer.DrawCheckBox(graphics, point, visualState);
+    }
+}
 static class Prompt
 {
     static FlowLayoutPanel Buttons(Button ok, Button cancel)

@@ -39,7 +39,7 @@ The LCD and backlight turn off after three minutes without a status change or bu
 
 The manager is organized around everyday file work. Select drives, then drag files anywhere onto the window or choose **Add Files to Selected**. This distributes files immediately without requiring the drives to be synchronized.
 
-Each file row has its own checkbox. Check any set of files and **Sync...**, right-click sync, or Delete will act on that checked set; when nothing is checked, **Sync...** continues to synchronize the complete file view. Ctrl/Shift row selection remains available as a fallback.
+Each file row has its own checkbox, and the checkbox in the column header toggles every visible file on or off. Check any set of files and **Sync...** will synchronize only that set; when nothing is checked, **Sync...** synchronizes the complete file view. The **Add files**, **Sync...**, **Refresh**, and confirmed **Delete** buttons sit together directly above the file list. Ctrl/Shift row selection remains available for right-click actions and Delete-key use.
 
 While files are being added or synchronized, the bottom status bar shows live byte progress, the current filename and destination, and the completed transfer count. Large single-file transfers therefore continue to show movement instead of only displaying a busy cursor.
 

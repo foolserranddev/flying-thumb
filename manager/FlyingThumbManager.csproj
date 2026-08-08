@@ -8,9 +8,9 @@
     <AssemblyName>FlyingThumbManager</AssemblyName>
     <RootNamespace>FlyingThumbManager</RootNamespace>
     <ApplicationIcon>assets\flying-thumb.ico</ApplicationIcon>
-    <Version>1.0.9</Version>
-    <AssemblyVersion>1.0.9.0</AssemblyVersion>
-    <FileVersion>1.0.9.0</FileVersion>
+    <Version>1.0.10</Version>
+    <AssemblyVersion>1.0.10.0</AssemblyVersion>
+    <FileVersion>1.0.10.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="assets\flying-thumb.png" CopyToOutputDirectory="PreserveNewest" />
