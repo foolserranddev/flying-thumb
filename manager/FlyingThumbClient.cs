@@ -56,6 +56,13 @@ public sealed class FlyingThumbClient
         await using var stream=File.OpenRead(filePath);using var content=new MultipartFormDataContent();using var file=new StreamContent(stream);AddFilePart(content,file,"file",filePath);using var response=await http.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0",key,content));await EnsureSuccessAsync(response,$"Upload {Path.GetFileName(filePath)}");
     }
 
+    public async Task DeleteAsync(Device d,string remoteName,string key)
+    {
+        if(d.IsSimulated){var demoPath=DemoPath(d,remoteName);if(File.Exists(demoPath))File.Delete(demoPath);return;}
+        var encodedPath=Uri.EscapeDataString("/"+Path.GetFileName(remoteName));
+        using var response=await http.SendAsync(Request(d,HttpMethod.Post,"delete?dir="+encodedPath,key,new StringContent("")));
+        await EnsureSuccessAsync(response,$"Delete {Path.GetFileName(remoteName)}");
+    }
     public async Task<bool> BeginFileBatchAsync(Device d,string key)
     {
         if(d.IsSimulated)return true;
