@@ -698,7 +698,8 @@ public sealed class MainForm : Form
                 var parts = new List<string>();
                 if (outdatedDrives.Length > 0) parts.Add($"{outdatedDrives.Length} drive{(outdatedDrives.Length == 1 ? "" : "s")}");
                 if (managerNeedsUpdate) parts.Add("Flying Thumb Manager");
-                updateNotice.Text = "Update available for " + string.Join(" and ", parts) + ". Drive updates usually take about 5 seconds each.";
+                updateNotice.Text = "Update available for " + string.Join(" and ", parts) + ".";
+                if (outdatedDrives.Length > 0) updateNotice.Text += " Drive updates usually take about 5 seconds each.";
                 WriteLog(updateNotice.Text);
                 summary.Text = "Update available";
             }
@@ -725,7 +726,10 @@ public sealed class MainForm : Form
         var description = new List<string>();
         if (outdatedDrives.Length > 0) description.Add($"update {outdatedDrives.Length} drive{(outdatedDrives.Length == 1 ? "" : "s")}");
         if (managerNeedsUpdate) description.Add("update Flying Thumb Manager");
-        if (MessageBox.Show(this, "Ready to " + string.Join(" and ", description) + ".\n\nEach drive update usually takes about 5 seconds. Keep the drives powered until they reconnect.", "Install Flying Thumb Updates", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+        var updateDetails = outdatedDrives.Length > 0
+            ? "\n\nEach drive update usually takes about 5 seconds. Keep the drives powered until they reconnect."
+            : "\n\nThe Manager will close and restart automatically.";
+        if (MessageBox.Show(this, "Ready to " + string.Join(" and ", description) + "." + updateDetails, "Install Flying Thumb Updates", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
