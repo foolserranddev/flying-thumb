@@ -9,7 +9,7 @@ Flying Thumb turns a **LILYGO T-Dongle-S3** and microSD card into a Wi-Fi-manage
 - Setup hotspot and WPS provisioning
 - Five-second button hold to forget Wi-Fi
 - Friendly machine names such as `LongArm-1`
-- A permanent hardware-derived device ID
+- A permanent hardware-derived drive ID
 - mDNS service advertisement at `_flyingthumb._tcp.local`
 - UDP discovery on port 4210 for reliable Windows discovery
 - Shop-key protection for uploads, deletes, renaming, and restarts
@@ -31,11 +31,15 @@ Use this same path to recover a dongle locally if a wireless firmware upgrade is
 
 After restarting, the setup hotspot turns off. The display shows the friendly machine name and IP address but never the joined Wi-Fi name.
 
-A short button press starts WPS. Holding the button for five seconds erases the stored Wi-Fi network and returns the device to setup mode. The device name and management key are retained.
+A short button press starts WPS. Holding the button for five seconds erases the stored Wi-Fi network and returns the drive to setup mode. The drive name and management key are retained.
+
+The LCD and backlight turn off after three minutes without a status change or button press. A short press while the screen is off only wakes the display; it does not start WPS. Holding for five seconds still performs the Wi-Fi reset. On an established Wi-Fi connection, firmware 2.4.0 uses maximum modem sleep: the radio wakes for access-point beacons and queued traffic, keeping discovery and file access available while reducing idle radio power. Setup access-point mode remains fully awake.
 
 ## Flying Thumb Manager
 
-The manager is organized around everyday file work. Select devices, then drag files anywhere onto the window or choose **Add Files to Selected**. This distributes files immediately without requiring the drives to be synchronized.
+The manager is organized around everyday file work. Select drives, then drag files anywhere onto the window or choose **Add Files to Selected**. This distributes files immediately without requiring the drives to be synchronized.
+
+Each file row has its own checkbox. Check any set of files and **Sync...**, right-click sync, or Delete will act on that checked set; when nothing is checked, **Sync...** continues to synchronize the complete file view. Ctrl/Shift row selection remains available as a fallback.
 
 While files are being added or synchronized, the bottom status bar shows live byte progress, the current filename and destination, and the completed transfer count. Large single-file transfers therefore continue to show movement instead of only displaying a busy cursor.
 
@@ -43,7 +47,7 @@ The **Files across all drives** view shows the additive union of filenames and c
 
 Choose **Sync...** to keep unique files additive across the included drives. For each differing same-name file, choose which drive's copy should win; check **Apply option to all files** to reuse that drive for the remaining conflicts. Select any number of file rows and right-click **Sync selected files...** to resolve or distribute only that selection; the one-row wording remains **Sync this file...**. Synchronization never deletes files. Select one or more rows and press **Delete**, or right-click and choose **Delete**, to remove every listed copy from the included drives after confirmation.
 
-Discovery, renaming, update checks, and USB installation/recovery live in the **File** and **Devices** menus. The manager checks for updates after discovering drives and also provides **File > Check for Updates**. When an update is available, choose **Update Now**; a typical drive update takes about five seconds.
+Discovery, renaming, update checks, and USB installation/recovery live in the **File** and **Drives** menus. The manager checks for updates after discovering drives and also provides **File > Check for Updates**. When an update is available, choose **Update Now**; a typical drive update takes about five seconds.
 ## Automatic update checks
 
 The first installation uses the USB button-hold installer. After that, the manager checks GitHub Releases after discovering drives and compares each discovered drive with the latest available software. It only displays an update notice when something can be updated. Choose **Update Now** to update every discovered outdated drive; a typical drive update takes about five seconds. Wi-Fi credentials, friendly names, shop keys, and microSD files are retained.
@@ -51,7 +55,7 @@ The first installation uses the USB button-hold installer. After that, the manag
 Use **File > Check for Updates** to check manually. Downloads are delivered over HTTPS and verified against the SHA-256 values in the release manifest before installation.
 ## Removable demo drives
 
-Run **`scripts/create-demo-drives.ps1`** to create a local `demo-drives` folder containing three folder-backed simulated drives. The manager discovers them through a separate discovery provider and accesses them through the same `FlyingThumbClient` API used for real network devices. The UI, file matrix, drag-and-drop distribution, and additive synchronization therefore use the same application logic in both cases.
+Run **`scripts/create-demo-drives.ps1`** to create a local `demo-drives` folder containing three folder-backed simulated drives. The manager discovers them through a separate discovery provider and accesses them through the same `FlyingThumbClient` API used for real network drives. The UI, file matrix, drag-and-drop distribution, and additive synchronization therefore use the same application logic in both cases.
 
 The sample set includes shared files, machine-specific files, missing-file cases, and a deliberate `Shared Shop Notes.txt` conflict. The generated folder is intentionally excluded from Git so real test files are never published accidentally. Delete the single `demo-drives` folder to remove and disable every simulated drive; no source or configuration change is required.
 ## Firmware files
@@ -74,13 +78,13 @@ dotnet build manager/FlyingThumbManager.csproj -c Release
 
 ## Network protocol
 
-Managers broadcast the ASCII message `FLYINGTHUMB_DISCOVER_V1` to UDP port `4210`. Each dongle replies directly with its JSON identity, friendly name, address, firmware version, free space, and enrollment state. Devices also advertise `_flyingthumb._tcp.local` over mDNS.
+Managers broadcast the ASCII message `FLYINGTHUMB_DISCOVER_V1` to UDP port `4210`. Each dongle replies directly with its JSON identity, friendly name, address, firmware version, free space, and enrollment state. Drives also advertise `_flyingthumb._tcp.local` over mDNS.
 
 Mutating HTTP requests use the `X-FlyingThumb-Key` header. Credentials and management keys are never included in discovery responses.
 
 ## Storage safety
 
-Every physical plug-in starts as a normal writable USB thumb drive. Discovery and file viewing do not change that state. Before the first Manager/web file mutation, firmware 2.2.0 or newer blocks USB writes, logically refreshes the medium as read-only, remounts FatFs to discard stale metadata, and grants the network side exclusive write control. With firmware 2.3.0 or newer, choose **Devices > Return USB to Writable Mode...** to safely remount and reconnect the disk as writable without physically unplugging it. A later Manager mutation repeats the managed-mode handoff.
+Every physical plug-in starts as a normal writable USB thumb drive. Discovery and file viewing do not change that state. Before the first Manager/web file mutation, firmware 2.2.0 or newer blocks USB writes, logically refreshes the medium as read-only, remounts FatFs to discard stale metadata, and grants the network side exclusive write control. With firmware 2.3.0 or newer, choose **Drives > Return USB to Writable Mode...** to safely remount and reconnect the disk as writable without physically unplugging it. A later Manager mutation repeats the managed-mode handoff.
 
 Uploads are transactional: data is written to a hidden temporary file, verified, swapped into place while preserving the previous file as a rollback copy, and verified again. After a completed batch, the firmware reports a logical media change so the attached host reloads the directory; the ESP32 and USB controller remain connected. Manager 1.0.3 or newer refuses file changes on older firmware because the former surprise-disconnect method could damage FAT metadata.
 

@@ -27,6 +27,8 @@ public sealed class MainForm : Form
     readonly SplitContainer split = new();
     readonly System.Windows.Forms.Timer setupNetworkTimer = new() { Interval = 1500 };
     readonly Dictionary<string, List<RemoteFile>> inventories = new(StringComparer.OrdinalIgnoreCase);
+    readonly HashSet<string> checkedFiles = new(StringComparer.OrdinalIgnoreCase);
+    bool renderingFileMatrix;
     bool busy;
     bool adjustingSplit;
     bool setupPageOpened;
@@ -189,7 +191,7 @@ public sealed class MainForm : Form
     {
         var unavailable = targets.Where(device => !device.IsSimulated && !device.StorageReady).Select(device => device.Name).ToArray();
         if (unavailable.Length == 0) return true;
-        MessageBox.Show(this, "TF card unavailable on: " + string.Join(", ", unavailable) + ".\n\nCheck that the card is inserted, then restart the drive and refresh devices.", "Sync Cannot Start", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        MessageBox.Show(this, "TF card unavailable on: " + string.Join(", ", unavailable) + ".\n\nCheck that the card is inserted, then restart the drive and refresh drives.", "Sync Cannot Start", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         return false;
     }
     bool EnsureManagementKey(Device[] targets)
@@ -230,14 +232,15 @@ public sealed class MainForm : Form
     {
         var menu = new MenuStrip { BackColor = Color.White, RenderMode = ToolStripRenderMode.System, Padding = new Padding(8, 3, 0, 3) };
         var file = new ToolStripMenuItem("File");
-        file.DropDownItems.Add(Item("Find Drives", async (_, _) => await RefreshDevices(), Keys.F5));
+
         file.DropDownItems.Add(Item("Refresh File View", async (_, _) => await RefreshFileMatrix()));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("Install / Recover via USB...", RecoverUsb));
         file.DropDownItems.Add(Item("Check for Updates...", async (_, _) => await CheckForUpdates(true)));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("Exit", (_, _) => Close()));
-        var device = new ToolStripMenuItem("Devices");
+        var device = new ToolStripMenuItem("Drives");
+        device.DropDownItems.Add(Item("Find Drives", async (_, _) => await RefreshDevices(), Keys.F5));
         device.DropDownItems.Add(Item("Open Setup Page", (_, _) => OpenSetupPage(true)));
         device.DropDownItems.Add(new ToolStripSeparator());
         device.DropDownItems.Add(Item("Select All", (_, _) => SelectAll(true)));
@@ -299,8 +302,8 @@ public sealed class MainForm : Form
 
     void ConfigureFileGrid()
     {
-        fileGrid.Dock = DockStyle.Fill; fileGrid.AllowUserToAddRows = false; fileGrid.AllowUserToDeleteRows = false; fileGrid.ReadOnly = true;
-        fileGrid.MultiSelect = true; fileGrid.RowHeadersVisible = false; fileGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; fileGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        fileGrid.Dock = DockStyle.Fill; fileGrid.AllowUserToAddRows = false; fileGrid.AllowUserToDeleteRows = false; fileGrid.ReadOnly = false;
+        fileGrid.MultiSelect = true; fileGrid.RowHeadersVisible = false; fileGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; fileGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect; fileGrid.EditMode = DataGridViewEditMode.EditOnEnter;
         ApplyExplorerGridStyle(fileGrid);
         var menu = new ContextMenuStrip();
         var syncFiles = new ToolStripMenuItem("Sync selected files...");
@@ -308,9 +311,17 @@ public sealed class MainForm : Form
         syncFiles.Click += async (_, _) => await SyncSelectedFiles();
         delete.Click += async (_, _) => await DeleteSelectedFiles();
         menu.Items.Add(syncFiles); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add(delete);
-        menu.Opening += (_, e) => { var count = fileGrid.SelectedRows.Count; syncFiles.Text = count == 1 ? "Sync this file..." : "Sync selected files..."; syncFiles.Enabled = delete.Enabled = !busy && count > 0; e.Cancel = count == 0; };
+        menu.Opening += (_, e) => { var count = ChosenFileNames().Length; syncFiles.Text = count == 1 ? "Sync this file..." : "Sync selected files..."; syncFiles.Enabled = delete.Enabled = !busy && count > 0; e.Cancel = count == 0; };
         fileGrid.ContextMenuStrip = menu;
-        fileGrid.CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && !fileGrid.Rows[e.RowIndex].Selected) { fileGrid.ClearSelection(); fileGrid.Rows[e.RowIndex].Selected = true; fileGrid.CurrentCell = fileGrid.Rows[e.RowIndex].Cells[0]; } };
+        fileGrid.CurrentCellDirtyStateChanged += (_, _) => { if (fileGrid.IsCurrentCellDirty && fileGrid.CurrentCell?.OwningColumn.Name == "FileChecked") fileGrid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
+        fileGrid.CellValueChanged += (_, e) =>
+        {
+            if (renderingFileMatrix || e.RowIndex < 0 || e.ColumnIndex < 0 || e.ColumnIndex >= fileGrid.Columns.Count || fileGrid.Columns[e.ColumnIndex].Name != "FileChecked") return;
+            var row = fileGrid.Rows[e.RowIndex]; var name = row.Cells["FileName"].Value?.ToString(); if (string.IsNullOrWhiteSpace(name)) return;
+            if (row.Cells["FileChecked"].Value is true) checkedFiles.Add(name); else checkedFiles.Remove(name);
+            summary.Text = checkedFiles.Count == 0 ? "No files checked; Sync applies to all files" : $"{checkedFiles.Count} file(s) checked for file actions";
+        };
+        fileGrid.CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0) { if (checkedFiles.Count == 0 && !fileGrid.Rows[e.RowIndex].Selected) { fileGrid.ClearSelection(); fileGrid.Rows[e.RowIndex].Selected = true; } fileGrid.CurrentCell = fileGrid.Rows[e.RowIndex].Cells["FileName"]; } };
         fileGrid.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Delete && !busy) { e.Handled = true; e.SuppressKeyPress = true; await DeleteSelectedFiles(); } };
     }
 
@@ -337,7 +348,7 @@ public sealed class MainForm : Form
         if (switching == 0) return true;
         var noun = switching == 1 ? "drive" : "drives";
         return MessageBox.Show(this,
-            $"This will place {switching} {noun} in managed mode. USB becomes read-only while Flying Thumb Manager controls file changes.\n\nClose any files currently being written through USB. Afterward, choose Devices > Return USB to Writable Mode (firmware 2.3 or newer), or unplug and reconnect the Flying Thumb.",
+            $"This will place {switching} {noun} in managed mode. USB becomes read-only while Flying Thumb Manager controls file changes.\n\nClose any files currently being written through USB. Afterward, choose Drives > Return USB to Writable Mode (firmware 2.3 or newer), or unplug and reconnect the Flying Thumb.",
             "Begin Managed File Session", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK;
     }
     async Task ReleaseManagedUsb()
@@ -370,6 +381,21 @@ public sealed class MainForm : Form
     }
     string Key => managementKey;
     Device[] SelectedDevices() { deviceGrid.EndEdit(); return devices.Where(x => x.Selected).ToArray(); }
+    string[] CheckedFileNames()
+    {
+        fileGrid.EndEdit();
+        return fileGrid.Rows.Cast<DataGridViewRow>().Where(row => row.Cells["FileChecked"].Value is true)
+            .Select(row => row.Cells["FileName"].Value?.ToString()).Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => Path.GetFileName(name!)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+    string[] ChosenFileNames()
+    {
+        var checkedNames = CheckedFileNames();
+        if (checkedNames.Length > 0) return checkedNames;
+        return fileGrid.SelectedRows.Cast<DataGridViewRow>().Select(row => row.Cells["FileName"].Value?.ToString())
+            .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => Path.GetFileName(name!))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
     void SelectAll(bool selected) { foreach (var d in devices) d.Selected = selected; deviceGrid.Refresh(); RenderFileMatrix(); }
     void WriteLog(string message) { if (InvokeRequired) { BeginInvoke(() => WriteLog(message)); return; } log.AppendText($"{DateTime.Now:t}  {message}{Environment.NewLine}"); }
     void SetBusy(bool value)
@@ -520,24 +546,28 @@ public sealed class MainForm : Form
     void RenderFileMatrix()
     {
         var shown = devices.Where(d => d.Selected).ToArray();
+        var names = shown.Where(d => inventories.ContainsKey(d.Id)).SelectMany(d => inventories[d.Id]).Where(x => x.Type == "file").Select(x => Path.GetFileName(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        checkedFiles.IntersectWith(names);
+        renderingFileMatrix = true;
         fileGrid.SuspendLayout();
         fileGrid.Columns.Clear();
         fileGrid.Rows.Clear();
-        fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "File", FillWeight = 150 });
-        fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Overall", FillWeight = 65 });
-        foreach (var d in shown) fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = d.Name, FillWeight = 75 });
-        var names = shown.Where(d => inventories.ContainsKey(d.Id)).SelectMany(d => inventories[d.Id]).Where(x => x.Type == "file").Select(x => Path.GetFileName(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase);
+        fileGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "FileChecked", HeaderText = "", ReadOnly = false, Width = 46, MinimumWidth = 46, AutoSizeMode = DataGridViewAutoSizeColumnMode.None, SortMode = DataGridViewColumnSortMode.NotSortable });
+        fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FileName", HeaderText = "File", ReadOnly = true, FillWeight = 150 });
+        fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Overall", HeaderText = "Overall", ReadOnly = true, FillWeight = 65 });
+        foreach (var d in shown) fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = d.Name, ReadOnly = true, FillWeight = 75 });
         foreach (var name in names)
         {
             var entries = shown.Select(d => inventories.TryGetValue(d.Id, out var files) ? files.FirstOrDefault(f => string.Equals(Path.GetFileName(f.Name), name, StringComparison.OrdinalIgnoreCase)) : null).ToArray();
             var sizes = entries.Where(x => x is not null).Select(x => x!.Size).Distinct().ToArray();
             var state = sizes.Length > 1 ? "CONFLICT" : entries.All(x => x is not null) ? "On every included drive" : $"On {entries.Count(x => x is not null)}/{shown.Length}";
-            var cells = new List<object> { name, state };
+            var cells = new List<object> { checkedFiles.Contains(name), name, state };
             cells.AddRange(entries.Select(x => x is null ? "-" : $"Yes - {FormatSize(x.Size)}"));
             var row = fileGrid.Rows[fileGrid.Rows.Add(cells.ToArray())];
             if (sizes.Length > 1) row.DefaultCellStyle.BackColor = Color.MistyRose;
         }
         fileGrid.ResumeLayout();
+        renderingFileMatrix = false;
         tabs.SelectedIndex = 0;
         summary.Text = shown.Length == 0 ? "No drives included" : $"Showing {fileGrid.Rows.Count} unique file(s) across {shown.Length} included drive(s)";
     }
@@ -547,28 +577,19 @@ public sealed class MainForm : Form
         if (busy) return;
         var targets = SelectedDevices();
         if (targets.Length < 2) { MessageBox.Show(this, "Include at least two drives before syncing.", "Sync Drives", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        await SyncAcrossDevices();
+        var checkedNames = CheckedFileNames();
+        if (checkedNames.Length > 0) await SyncAcrossDevices(checkedNames); else await SyncAcrossDevices();
     }
 
     async Task SyncSelectedFiles()
     {
-        var names = fileGrid.SelectedRows.Cast<DataGridViewRow>()
-            .Select(row => row.Cells.Count > 0 ? row.Cells[0].Value?.ToString() : null)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => Path.GetFileName(name!))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var names = ChosenFileNames();
         if (names.Length > 0) await SyncAcrossDevices(names);
     }
     async Task DeleteSelectedFiles()
     {
         if (busy) return;
-        var names = fileGrid.SelectedRows.Cast<DataGridViewRow>()
-            .Select(row => row.Cells.Count > 0 ? row.Cells[0].Value?.ToString() : null)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => Path.GetFileName(name!))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var names = ChosenFileNames();
         if (names.Length == 0) return;
 
         var included = SelectedDevices();
@@ -584,7 +605,7 @@ public sealed class MainForm : Form
         var preview = string.Join("\n", names.Take(8).Select(name => "  " + name));
         if (names.Length > 8) preview += $"\n  ...and {names.Length - 8} more";
         var switching = targets.Count(device => !device.IsSimulated && !device.UsbManaged);
-        var modeNote = switching > 0 ? $"\n\n{switching} drive{(switching == 1 ? "" : "s")} will enter managed mode; the attached machine's USB access becomes read-only until released from the Devices menu or replugged. Flying Thumb Manager retains write access." : "";
+        var modeNote = switching > 0 ? $"\n\n{switching} drive{(switching == 1 ? "" : "s")} will enter managed mode; the attached machine's USB access becomes read-only until released from the Drives menu or replugged. Flying Thumb Manager retains write access." : "";
         if (MessageBox.Show(this, $"Permanently delete {names.Length} selected file{(names.Length == 1 ? "" : "s")} ({copies} total {copyWord}) from the included drives?\n\n{preview}{modeNote}\n\nThis cannot be undone.", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
 
         SetBusy(true);
@@ -1037,7 +1058,7 @@ public sealed class MainForm : Form
         var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe"); var image = Path.Combine(AppContext.BaseDirectory, "FlyingThumb-v2-full.bin");
         if (!File.Exists(flasher) || !File.Exists(image)) { MessageBox.Show("Recovery files are missing. Re-copy the complete manager folder."); return; }
         var before = SerialPorts();
-        if (MessageBox.Show("1. Unplug the LILYGO completely.\n\n2. Press and keep holding its button.\n\n3. While still holding it, plug it directly into this PC.\n\n4. Keep holding until Windows detects the USB device (usually 2-5 seconds), then release.\n\nClick OK afterward.", "USB recovery mode", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
+        if (MessageBox.Show("1. Unplug the LILYGO completely.\n\n2. Press and keep holding its button.\n\n3. While still holding it, plug it directly into this PC.\n\n4. Keep holding until Windows detects the USB drive (usually 2-5 seconds), then release.\n\nClick OK afterward.", "USB recovery mode", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
         string? port = null; for (var i = 0; i < 20 && port is null; i++) { var now = SerialPorts(); port = now.Except(before, StringComparer.OrdinalIgnoreCase).FirstOrDefault(); if (port is null && now.Length == 1) port = now[0]; if (port is null) await Task.Delay(500); }
         if (port is null)
         {

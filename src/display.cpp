@@ -15,6 +15,8 @@ esp_lcd_panel_handle_t panel = nullptr;
 esp_lcd_panel_io_handle_t panelIo = nullptr;
 uint16_t frame[LCD_W * LCD_H];
 CRGB led;
+bool displayAwake = false;
+uint32_t displayTouchedAt = 0;
 
 constexpr char glyphKeys[] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-:/_?";
 constexpr uint8_t glyphs[][5] = {
@@ -82,10 +84,12 @@ void initDisplay() {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
   digitalWrite(PIN_TFT_BL, LOW);
   clear(0x07FF); present(); delay(350);
+  displayAwake = true; displayTouchedAt = millis();
   FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1); FastLED.setBrightness(24);
 }
 
 void displayMessage(const char *title, const char *line1, const char *line2) {
+  wakeDisplay();
   clear(0x0000);
   int titleScale = title && strlen(title) <= 13 ? 2 : 1;
   centered(title, 8, titleScale, 0x07FF);
@@ -94,6 +98,24 @@ void displayMessage(const char *title, const char *line1, const char *line2) {
   present();
 }
 
+bool wakeDisplay() {
+  const bool wasOff = !displayAwake;
+  displayTouchedAt = millis();
+  if (wasOff) {
+    if (panel) esp_lcd_panel_disp_on_off(panel, true);
+    digitalWrite(PIN_TFT_BL, LOW);
+    present();
+    displayAwake = true;
+  }
+  return wasOff;
+}
+
+void handleDisplayPower() {
+  if (!displayAwake || millis() - displayTouchedAt < DISPLAY_IDLE_MS) return;
+  digitalWrite(PIN_TFT_BL, HIGH);
+  if (panel) esp_lcd_panel_disp_on_off(panel, false);
+  displayAwake = false;
+}
 void setActivityLed(bool reading, bool writing) {
   static uint8_t old = 0xff; uint8_t state = (reading ? 1 : 0) | (writing ? 2 : 0); if (state == old) return; old = state;
   led = writing ? (reading ? CRGB::Yellow : CRGB::Red) : (reading ? CRGB::Green : CRGB::Blue); FastLED.show();

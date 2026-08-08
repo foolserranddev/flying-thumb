@@ -5,4 +5,5 @@ constexpr int PIN_TFT_SCLK=5, PIN_TFT_BL=38;
 constexpr int PIN_SD_CLK=12, PIN_SD_CMD=16, PIN_SD_D0=14, PIN_SD_D1=17, PIN_SD_D2=21, PIN_SD_D3=18;
 constexpr int PIN_LED_DATA=39, PIN_LED_CLOCK=40;
 constexpr uint32_t RESET_HOLD_MS=5000, DEBOUNCE_MS=50, STA_CONNECT_TIMEOUT_MS=15000;
+constexpr uint32_t DISPLAY_IDLE_MS=180000;
 constexpr char SETUP_PASSWORD[]="flyingthumb";

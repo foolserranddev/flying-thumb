@@ -10,6 +10,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <esp_wps.h>
+#include <esp_wifi.h>
 #include <esp_ota_ops.h>
 #include "board_config.h"
 #include "display.h"
@@ -25,7 +26,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.3.0";
+constexpr char FIRMWARE_VERSION_BASE[]="2.4.0";
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
 WebServer server(80); DNSServer dns; WiFiUDP discovery; Preferences prefs; File uploadFile;
@@ -47,10 +48,11 @@ void finishStandaloneUsbUpdate(){if(standaloneUsbUpdate){standaloneUsbUpdate=fal
 void beginFileBatch(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}if(!fileBatchActive&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not enter managed mode\"}");return;}fileBatchActive=true;fileBatchTouchedAt=millis();server.send(200,"application/json","{\"status\":\"batch-ready\"}");}
 void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;server.send(200,"application/json","{\"status\":\"usb-refreshing\"}");finishUsbFileUpdate();}
 void releaseManagedUsb(){if(!requireAuth())return;if(fileBatchActive||usbFileUpdateActive()){server.send(409,"application/json","{\"error\":\"file update still active\"}");return;}if(!releaseUsbManagedMode()){server.send(500,"application/json","{\"error\":\"USB storage could not return to writable mode\"}");return;}server.send(200,"application/json","{\"status\":\"usb-writable\"}");}
+void enableWifiPowerSave(){if(WiFi.getMode()==WIFI_STA||WiFi.getMode()==WIFI_AP_STA)esp_wifi_set_ps(WIFI_PS_MAX_MODEM);}
 void showConnected(){String ip=WiFi.localIP().toString(),status="USB RW / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}
 void startDiscovery(){String h=makeHostName(),version=firmwareVersion();if(MDNS.begin(h.c_str())){MDNS.addService("flyingthumb","tcp",80);MDNS.addServiceTxt("flyingthumb","tcp","id",deviceId.c_str());MDNS.addServiceTxt("flyingthumb","tcp","name",deviceName.c_str());MDNS.addServiceTxt("flyingthumb","tcp","version",version.c_str());}discovery.begin(DISCOVERY_PORT);}
 void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
-void onWifiEvent(WiFiEvent_t e){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS){esp_wifi_wps_disable();WiFi.begin();delay(100);savedSsid=WiFi.SSID();savedPassword=WiFi.psk();saveNetwork(savedSsid,savedPassword);}else if(e==ARDUINO_EVENT_WPS_ER_FAILED||e==ARDUINO_EVENT_WPS_ER_TIMEOUT){esp_wifi_wps_disable();displayMessage("WPS FAILED","Short press","to retry");}}
+void onWifiEvent(WiFiEvent_t e){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){enableWifiPowerSave();showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS){esp_wifi_wps_disable();WiFi.begin();delay(100);savedSsid=WiFi.SSID();savedPassword=WiFi.psk();saveNetwork(savedSsid,savedPassword);}else if(e==ARDUINO_EVENT_WPS_ER_FAILED||e==ARDUINO_EVENT_WPS_ER_TIMEOUT){esp_wifi_wps_disable();displayMessage("WPS FAILED","Short press","to retry");}}
 void sendIndex(){if(WiFi.getMode()==WIFI_AP){server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);return;}server.send_P(200,"text/html",(const char*)index_html_start,index_html_end-index_html_start);}
 void sendSettings(){server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);}
 void sendCaptivePortal(){server.sendHeader("Cache-Control","no-store");server.sendHeader("Location","http://192.168.77.1/",true);server.send(302,"text/plain","Open Flying Thumb Setup");}

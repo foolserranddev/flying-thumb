@@ -14,6 +14,7 @@ namespace {
 volatile uint32_t lastRead = 0, lastWrite = 0;
 uint32_t pressedAt = 0;
 bool resetHandled = false;
+bool wakeOnlyPress = false;
 bool usbDiskReady = false, usbUpdateActive = false, usbManagedMode = false;
 volatile bool usbWritesBlocked = false;
 
@@ -73,16 +74,17 @@ void startUsbDisk() {
 }
 void serviceButton() {
   const bool down = digitalRead(PIN_BUTTON) == LOW;
-  if (down && !pressedAt) { pressedAt = millis(); resetHandled = false; }
+  if (down && !pressedAt) { pressedAt = millis(); resetHandled = false; wakeOnlyPress = wakeDisplay(); }
   if (down && !resetHandled && millis() - pressedAt >= RESET_HOLD_MS) {
     resetHandled = true; displayMessage("RESETTING", "WiFi cleared", "Setup mode");
     clearNetworkSettings(); delay(800); ESP.restart();
   }
   if (!down && pressedAt) {
     const uint32_t duration = millis() - pressedAt; pressedAt = 0;
-    if (!resetHandled && duration >= DEBOUNCE_MS && duration < RESET_HOLD_MS) {
+    if (!resetHandled && !wakeOnlyPress && duration >= DEBOUNCE_MS && duration < RESET_HOLD_MS) {
       displayMessage("WPS PAIRING", "Press router", "WPS button"); beginWpsPairing();
     }
+    wakeOnlyPress = false;
   }
 }
 }
@@ -170,5 +172,5 @@ void setup() {
 }
 void loop() {
   serviceButton(); handleNetworkAndServer();
-  setActivityLed(millis() - lastRead < 250, millis() - lastWrite < 250); delay(2);
+  setActivityLed(millis() - lastRead < 250, millis() - lastWrite < 250); handleDisplayPower(); delay(2);
 }
