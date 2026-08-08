@@ -293,10 +293,12 @@ public sealed class MainForm : Form
         fileGrid.MultiSelect = true; fileGrid.RowHeadersVisible = false; fileGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; fileGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         ApplyExplorerGridStyle(fileGrid);
         var menu = new ContextMenuStrip();
+        var syncFile = new ToolStripMenuItem("Sync this file...");
         var delete = new ToolStripMenuItem("Delete") { ShortcutKeyDisplayString = "Del" };
+        syncFile.Click += async (_, _) => await SyncSelectedFile();
         delete.Click += async (_, _) => await DeleteSelectedFiles();
-        menu.Items.Add(delete);
-        menu.Opening += (_, e) => { delete.Enabled = !busy && fileGrid.SelectedRows.Count > 0; e.Cancel = fileGrid.SelectedRows.Count == 0; };
+        menu.Items.Add(syncFile); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add(delete);
+        menu.Opening += (_, e) => { syncFile.Enabled = !busy && fileGrid.SelectedRows.Count == 1; delete.Enabled = !busy && fileGrid.SelectedRows.Count > 0; e.Cancel = fileGrid.SelectedRows.Count == 0; };
         fileGrid.ContextMenuStrip = menu;
         fileGrid.CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && !fileGrid.Rows[e.RowIndex].Selected) { fileGrid.ClearSelection(); fileGrid.Rows[e.RowIndex].Selected = true; fileGrid.CurrentCell = fileGrid.Rows[e.RowIndex].Cells[0]; } };
         fileGrid.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Delete && !busy) { e.Handled = true; e.SuppressKeyPress = true; await DeleteSelectedFiles(); } };
@@ -473,13 +475,14 @@ public sealed class MainForm : Form
         if (busy) return;
         var targets = SelectedDevices();
         if (targets.Length < 2) { MessageBox.Show(this, "Include at least two drives before syncing.", "Sync Drives", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        var choices = targets.Select((device, index) => $"{index + 1}. {device.Name}  ({(device.IsSimulated ? "Demo folder" : device.Ip)})").ToArray();
-        var choice = Prompt.Choose("Choose the master drive. Its version wins when the same filename differs. Unique files remain additive; sync does not delete files.", "Sync Selected Drives", choices, "Sync");
-        if (choice is null) return;
-        var selected = Array.IndexOf(choices, choice);
-        if (selected >= 0) await SyncAcrossDevices(targets[selected]);
+        await SyncAcrossDevices();
     }
 
+    async Task SyncSelectedFile()
+    {
+        var name = fileGrid.SelectedRows.Count == 1 ? fileGrid.SelectedRows[0].Cells[0].Value?.ToString() : null;
+        if (!string.IsNullOrWhiteSpace(name)) await SyncAcrossDevices(Path.GetFileName(name));
+    }
     async Task DeleteSelectedFiles()
     {
         if (busy) return;
@@ -648,84 +651,74 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "The batch continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb File Transfer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
-    async Task SyncAcrossDevices(Device master)
+    async Task SyncAcrossDevices(string? onlyFile = null)
     {
         if (busy) return;
         var targets = SelectedDevices();
-        if (targets.Length < 2 || !targets.Any(device => device.Id == master.Id)) { MessageBox.Show(this, "The chosen master drive is no longer included.", "Sync Drives", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets)) return;
-        if (!EnsureManagedFirmware(targets)) return;
+        if (targets.Length < 2) { MessageBox.Show(this, "Include at least two drives before syncing.", "Sync Drives", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets) || !EnsureManagedFirmware(targets)) return;
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
-        WriteLog($"Building an additive sync plan across {targets.Length} drives; {master.Name} is master...");
+        WriteLog(onlyFile is null ? $"Building an additive sync plan across {targets.Length} drives..." : $"Building a sync plan for {onlyFile} across {targets.Length} drives...");
         var current = new Dictionary<string, List<RemoteFile>>(StringComparer.OrdinalIgnoreCase);
         try
         {
             foreach (var device in targets)
-            {
-                if (inventories.TryGetValue(device.Id, out var cached))
-                    current[device.Id] = cached.Select(file => new RemoteFile { Name = file.Name, Size = file.Size, Type = file.Type }).ToList();
-                else
-                    current[device.Id] = await client.ListAsync(device, Key);
-            }
+                current[device.Id] = inventories.TryGetValue(device.Id, out var cached) ? cached.Select(file => new RemoteFile { Name = file.Name, Size = file.Size, Type = file.Type }).ToList() : await client.ListAsync(device, Key);
         }
         catch (Exception ex)
         {
-            WriteLog("Sync could not start - " + ex.Message);
-            summary.Text = "Sync could not read every selected drive";
-            SetBusy(false);
-            return;
+            WriteLog("Sync could not start - " + ex.Message); summary.Text = "Sync could not read every selected drive"; SetBusy(false); return;
         }
 
-        var names = current.Values.SelectMany(files => files).Where(file => file.Type == "file").Select(file => Path.GetFileName(file.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        var plan = new List<(string Name, (Device Device, RemoteFile File)[] Sources, Device[] Destinations)>();
-        int conflictsResolved = 0, conflictsSkipped = 0;
-        foreach (var name in names)
+        var names = current.Values.SelectMany(files => files).Where(file => file.Type == "file").Select(file => Path.GetFileName(file.Name)).Distinct(StringComparer.OrdinalIgnoreCase);
+        if (onlyFile is not null) names = names.Where(name => string.Equals(name, onlyFile, StringComparison.OrdinalIgnoreCase));
+        var namesToSync = names.ToArray();
+        if (namesToSync.Length == 0)
         {
-            var present = targets
-                .Select(device => (Device: device, File: current[device.Id].FirstOrDefault(file => string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))))
-                .Where(item => item.File is not null)
-                .Select(item => (Device: item.Device, File: item.File!))
-                .ToArray();
+            SetBusy(false); summary.Text = onlyFile is null ? "No files found to sync" : $"{onlyFile} is no longer in the file view"; WriteLog("No matching files were found; USB mode was not changed."); return;
+        }
+
+        var plan = new List<(string Name, (Device Device, RemoteFile File)[] Sources, Device[] Destinations)>();
+        string? applyToAllDeviceId = null;
+        int conflictsResolved = 0;
+        foreach (var name in namesToSync)
+        {
+            var present = targets.Select(device => (Device: device, File: current[device.Id].FirstOrDefault(file => string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))))
+                .Where(item => item.File is not null).Select(item => (Device: item.Device, File: item.File!)).ToArray();
             var sizes = present.Select(item => item.File.Size).Distinct().ToArray();
-            var masterEntries = present.Where(item => item.Device.Id == master.Id).ToArray();
             if (sizes.Length > 1)
             {
-                if (masterEntries.Length == 0)
+                var sourceMatches = applyToAllDeviceId is null ? [] : present.Where(item => item.Device.Id == applyToAllDeviceId).ToArray();
+                if (sourceMatches.Length == 0)
                 {
-                    conflictsSkipped++;
-                    WriteLog($"CONFLICT skipped: {name} differs, but it is not present on master {master.Name}.");
-                    continue;
+                    var choices = present.Select((item, index) => $"{index + 1}. {item.Device.Name} - {FormatSize(item.File.Size)}  ({(item.Device.IsSimulated ? "Demo folder" : item.Device.Ip)})").ToArray();
+                    SetBusy(false);
+                    var decision = Prompt.ChooseWithApply($"Choose which drive's copy of {name} should win.", "Resolve Sync Conflict", choices, "Apply option to all files", onlyFile is null);
+                    if (decision is null) { summary.Text = "Sync canceled - USB mode unchanged"; WriteLog("Sync was canceled while resolving conflicts; USB mode was not changed."); return; }
+                    SetBusy(true);
+                    var selected = Array.IndexOf(choices, decision.Value.Choice);
+                    if (selected < 0) { SetBusy(false); return; }
+                    sourceMatches = [present[selected]];
+                    if (decision.Value.ApplyToAll) applyToAllDeviceId = present[selected].Device.Id;
                 }
-                var source = masterEntries[0];
-                var destinations = targets.Where(device => device.Id != master.Id)
-                    .Where(device => current[device.Id].FirstOrDefault(file => string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))?.Size != source.File.Size)
-                    .ToArray();
+                var source = sourceMatches[0];
+                var destinations = targets.Where(device => device.Id != source.Device.Id)
+                    .Where(device => current[device.Id].FirstOrDefault(file => string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))?.Size != source.File.Size).ToArray();
                 if (destinations.Length > 0) plan.Add((name, [source], destinations));
                 conflictsResolved++;
-                WriteLog($"CONFLICT resolved from master: {name} will use {master.Name}'s version.");
+                WriteLog($"CONFLICT: {name} will use {source.Device.Name}'s version{(applyToAllDeviceId == source.Device.Id ? " (applied to remaining conflicts)" : "")}.");
                 continue;
             }
-
-            var orderedSources = present.OrderByDescending(item => item.Device.Id == master.Id).ToArray();
             var missing = targets.Where(device => !present.Any(item => item.Device.Id == device.Id)).ToArray();
-            if (missing.Length > 0) plan.Add((name, orderedSources, missing));
+            if (missing.Length > 0) plan.Add((name, present, missing));
         }
 
         var plannedCopies = plan.Sum(item => item.Destinations.Length);
-        WriteLog($"Sync plan: {plannedCopies} file copy operation(s), {conflictsResolved} conflict(s) resolved by master, {conflictsSkipped} conflict(s) skipped.");
-        if (plannedCopies == 0)
-        {
-            SetBusy(false);
-            summary.Text = names.Length == 0 ? "No files found to sync - USB mode unchanged" : "Already synchronized - USB mode unchanged";
-            WriteLog(names.Length == 0 ? "No files were found on the selected drives; USB mode was not changed." : "No files need copying; USB mode was not changed.");
-            return;
-        }
-
-        SetBusy(false);
-        if (!ConfirmManagedUsb(targets)) return;
-        SetBusy(true);
+        WriteLog($"Sync plan: {plannedCopies} file copy operation(s), {conflictsResolved} conflict choice(s).");
+        if (plannedCopies == 0) { SetBusy(false); summary.Text = "Already synchronized - USB mode unchanged"; WriteLog("No files need copying; USB mode was not changed."); return; }
+        SetBusy(false); if (!ConfirmManagedUsb(targets)) return; SetBusy(true);
 
         var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -733,92 +726,44 @@ public sealed class MainForm : Form
         var errors = new List<string>();
         foreach (var device in targets)
         {
-            try
-            {
-                batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key);
-                if (batchMode[device.Id] && UsesManagedUsb(device)) device.UsbManaged = true;
-            }
-            catch (Exception ex)
-            {
-                blocked.Add(device.Id); failed.Add(device.Id);
-                errors.Add($"{device.Name} / prepare sync: {ex.Message}");
-                SetStatus(device, "Could not prepare sync");
-            }
+            try { batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key); if (batchMode[device.Id] && UsesManagedUsb(device)) device.UsbManaged = true; }
+            catch (Exception ex) { blocked.Add(device.Id); failed.Add(device.Id); errors.Add($"{device.Name} / prepare sync: {ex.Message}"); SetStatus(device, "Could not prepare sync"); }
         }
 
         int copied = 0;
-        var temp = Path.Combine(Path.GetTempPath(), "FlyingThumb", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(temp);
+        var temp = Path.Combine(Path.GetTempPath(), "FlyingThumb", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
         try
         {
             foreach (var item in plan)
             {
                 var availableSources = item.Sources.Where(source => !blocked.Contains(source.Device.Id)).ToArray();
-                if (availableSources.Length == 0)
-                {
-                    errors.Add($"Could not read {item.Name}: its required source drive did not enter managed mode.");
-                    WriteLog($"FAILED to stage {item.Name}; no prepared source drive is available.");
-                    continue;
-                }
+                if (availableSources.Length == 0) { errors.Add($"Could not read {item.Name}: its chosen source drive did not enter managed mode."); WriteLog($"FAILED to stage {item.Name}; no prepared source drive is available."); continue; }
                 var source = availableSources[0];
                 var destinations = item.Destinations.Where(device => !blocked.Contains(device.Id)).ToArray();
                 if (destinations.Length == 0) continue;
                 var local = Path.Combine(temp, item.Name);
                 try { await client.DownloadAsync(source.Device, item.Name, local); }
-                catch (Exception ex)
-                {
-                    errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}");
-                    WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}");
-                    continue;
-                }
-
+                catch (Exception ex) { errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}"); continue; }
                 foreach (var destination in destinations)
                 {
                     SetStatus(destination, $"Syncing {item.Name}...");
-                    try
-                    {
-                        await client.UploadAsync(destination, local, Key);
-                        RecordUploadedFile(destination, item.Name, source.File.Size);
-                        copied++;
-                        SetStatus(destination, "Synced");
-                        WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}.");
-                    }
-                    catch (Exception ex)
-                    {
-                        failed.Add(destination.Id);
-                        errors.Add($"{destination.Name} / {item.Name}: {ex.Message}");
-                        SetStatus(destination, "File failed; continuing sync...");
-                        WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}");
-                    }
+                    try { await client.UploadAsync(destination, local, Key); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
+                    catch (Exception ex) { failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {ex.Message}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}"); }
                 }
             }
 
             var sessions = targets.Where(device => !blocked.Contains(device.Id) && batchMode.GetValueOrDefault(device.Id)).ToArray();
             foreach (var device in sessions.Where(device => !device.IsSimulated)) SetStatus(device, "Refreshing USB drive...");
             foreach (var device in sessions)
-            {
-                try { await client.CommitFileBatchAsync(device, Key); }
-                catch (Exception ex)
-                {
-                    failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}");
-                    WriteLog($"{device.Name}: USB refresh failed - {ex.Message}");
-                }
-            }
+                try { await client.CommitFileBatchAsync(device, Key); } catch (Exception ex) { failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}"); WriteLog($"{device.Name}: USB refresh failed - {ex.Message}"); }
 
-            WriteLog($"Master sync finished: {copied} of {plannedCopies} planned copy operation(s), {conflictsResolved} conflict(s) resolved, {conflictsSkipped} skipped, {errors.Count} error(s).");
+            WriteLog($"Sync finished: {copied} of {plannedCopies} planned copy operation(s), {conflictsResolved} conflict choice(s), {errors.Count} error(s).");
             foreach (var device in devices.Where(device => sessions.Any(session => session.Id == device.Id) && !failed.Contains(device.Id))) SetStatus(device, ReadyStatus(device));
             foreach (var device in devices.Where(device => failed.Contains(device.Id))) SetStatus(device, "Sync incomplete");
-            SetBusy(false);
-            RenderFileMatrix();
-            summary.Text = errors.Count == 0 ? $"Sync complete - {copied} copies, master: {master.Name}" : $"Sync finished with {errors.Count} error(s)";
-            if (errors.Count > 0)
-                MessageBox.Show(this, "Sync continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb Sync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            SetBusy(false); RenderFileMatrix(); summary.Text = errors.Count == 0 ? $"Sync complete - {copied} copies" : $"Sync finished with {errors.Count} error(s)";
+            if (errors.Count > 0) MessageBox.Show(this, "Sync continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb Sync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        finally
-        {
-            try { Directory.Delete(temp, true); } catch { }
-            SetBusy(false);
-        }
+        finally { try { Directory.Delete(temp, true); } catch { } SetBusy(false); }
     }
     async Task<bool> RunForDevices(Device[] targets, Func<Device, Task<string>> action)
     {
@@ -1074,5 +1019,20 @@ static class Prompt
         var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel };
         layout.Controls.Add(Buttons(ok, cancel), 0, 2); form.AcceptButton = ok; form.CancelButton = cancel;
         return form.ShowDialog() == DialogResult.OK ? input.SelectedItem?.ToString() : null;
+    }
+    public static (string Choice, bool ApplyToAll)? ChooseWithApply(string label, string title, string[] choices, string checkText, bool showApply)
+    {
+        var choice = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Top };
+        choice.Items.AddRange(choices); if (choice.Items.Count > 0) choice.SelectedIndex = 0;
+        var apply = new CheckBox { Text = checkText, AutoSize = true, Visible = showApply, Margin = new Padding(0, 10, 0, 0) };
+        var input = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = new Padding(0) };
+        input.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); input.RowStyles.Add(new RowStyle(SizeType.AutoSize)); input.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        input.Controls.Add(choice, 0, 0); input.Controls.Add(apply, 0, 1);
+        using var form = Dialog(title, input, label, out var layout);
+        var ok = new Button { Text = "Use This Copy", DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel };
+        layout.Controls.Add(Buttons(ok, cancel), 0, 2); form.AcceptButton = ok; form.CancelButton = cancel;
+        if (form.ShowDialog() != DialogResult.OK || choice.SelectedItem is null) return null;
+        return (choice.SelectedItem.ToString()!, apply.Checked);
     }
 }

@@ -39,7 +39,7 @@ The manager is organized around everyday file work. Select devices, then drag fi
 
 The **Files across all drives** view shows the additive union of filenames and creates one status/size column per discovered drive. Missing files show `—`; present files show their size. Same-name files with different sizes are marked as conflicts.
 
-Choose **Sync...**, then select a master drive. Unique files remain additive across the included drives, while the master drive's version wins when the same filename has different sizes. Synchronization never deletes files. Select one or more rows in the combined file view and press **Delete**, or right-click and choose **Delete**, to remove every listed copy from the included drives after confirmation.
+Choose **Sync...** to keep unique files additive across the included drives. For each differing same-name file, choose which drive's copy should win; check **Apply option to all files** to reuse that drive for the remaining conflicts. Right-click a row and choose **Sync this file...** to resolve or distribute only that filename. Synchronization never deletes files. Select one or more rows and press **Delete**, or right-click and choose **Delete**, to remove every listed copy from the included drives after confirmation.
 
 Discovery, renaming, update checks, and USB installation/recovery live in the **File** and **Devices** menus. The manager checks for updates after discovering drives and also provides **File > Check for Updates**. When an update is available, choose **Update Now**; a typical drive update takes about five seconds.
 ## Automatic update checks
