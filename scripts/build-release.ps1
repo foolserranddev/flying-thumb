@@ -44,7 +44,7 @@ try {
         manager = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbManager.exe"; sha256 = (Get-FileHash $managerExe -Algorithm SHA256).Hash }
         firmware = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-wifi-update.bin"; sha256 = (Get-FileHash $wifiImage -Algorithm SHA256).Hash }
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
-        notes = "Make USB Recovery download and verify the latest firmware, show the exact firmware version and image source throughout recovery, and identify the Manager version in its activity log."
+        notes = "Enable the T-Dongle-S3's 8 MB OPI PSRAM so WPS has the working memory it requires, and log firmware and memory details during startup and WPS pairing."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

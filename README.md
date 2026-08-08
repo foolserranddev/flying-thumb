@@ -95,4 +95,4 @@ Uploads are transactional: data is written to a hidden temporary file, verified,
 - Red: USB write
 - Yellow: recent read and write
 
-The hardware pin assignments follow LILYGO's official T-Dongle-S3 documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.
+The firmware build selects the T-Dongle-S3's 16 MB flash and 8 MB octal PSRAM profile; WPS and Wi-Fi may use PSRAM while preserving internal memory for radio operations. The hardware pin assignments follow LILYGO's official T-Dongle-S3 documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.
