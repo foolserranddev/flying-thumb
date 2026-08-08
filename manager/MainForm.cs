@@ -1127,7 +1127,7 @@ public sealed class MainForm : Form
         if (!File.Exists(flasher)) { MessageBox.Show("The USB recovery tool is missing. Re-copy the complete manager folder."); return; }
         (string Path, string Version, string Source) recovery;
         SetBusy(true);
-        try { recovery = await ResolveRecoveryImage(); }
+        try { recovery = await ResolveRecoveryImage(); summary.Text = $"Recovery firmware {recovery.Version} ready."; }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Recovery Firmware Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error); SetBusy(false); return; }
         SetBusy(false);
         var image = recovery.Path;
@@ -1149,7 +1149,7 @@ public sealed class MainForm : Form
         SetBusy(true); tabs.SelectedIndex = 1; WriteLog($"USB recovery started on {port}: installing firmware {recovery.Version} from {recovery.Source} ({new FileInfo(image).Length:N0} bytes).");
         try { var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var a in new[] { "--chip", "esp32s3", "--port", port, "--baud", "921600", "write_flash", "0x0", image }) start.ArgumentList.Add(a); using var process = new Process { StartInfo = start }; process.OutputDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.ErrorDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); await process.WaitForExitAsync(); if (process.ExitCode != 0) throw new InvalidOperationException($"Flashing engine returned error {process.ExitCode}."); WriteLog($"USB installation completed successfully: firmware {recovery.Version} installed and verified."); MessageBox.Show($"Firmware {recovery.Version} installed successfully. Reconnect the LILYGO normally."); }
         catch (Exception ex) { WriteLog("USB recovery FAILED - " + ex.Message); MessageBox.Show("USB installation failed. Repeat the button-hold insertion and try again.\n\n" + ex.Message); }
-        finally { SetBusy(false); }
+        finally { summary.Text = "USB recovery finished."; SetBusy(false); }
     }
 }
 

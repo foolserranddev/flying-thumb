@@ -44,7 +44,7 @@ try {
         manager = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbManager.exe"; sha256 = (Get-FileHash $managerExe -Algorithm SHA256).Hash }
         firmware = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-wifi-update.bin"; sha256 = (Get-FileHash $wifiImage -Algorithm SHA256).Hash }
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
-        notes = "Run WPS in a memory-reserved boot mode before USB storage, the web server, and discovery load; restore normal drive mode after success or timeout."
+        notes = "Release the LCD framebuffer and SPI driver during memory-reserved WPS pairing, and clear the Manager recovery-check status after resolution and flashing."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

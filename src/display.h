@@ -1,6 +1,7 @@
 #pragma once
 void initDisplay();
 void displayMessage(const char *title, const char *line1, const char *line2);
+void releaseDisplayMemoryForWps();
 void setActivityLed(bool reading, bool writing);
 bool wakeDisplay();
 void handleDisplayPower();

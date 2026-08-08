@@ -6,6 +6,7 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
+#include "esp_heap_caps.h"
 
 namespace {
 constexpr int LCD_W = 160;
@@ -13,7 +14,7 @@ constexpr int LCD_H = 80;
 constexpr spi_host_device_t LCD_HOST = SPI2_HOST;
 esp_lcd_panel_handle_t panel = nullptr;
 esp_lcd_panel_io_handle_t panelIo = nullptr;
-uint16_t frame[LCD_W * LCD_H];
+uint16_t *frame = nullptr;
 CRGB led;
 bool displayAwake = false;
 uint32_t displayTouchedAt = 0;
@@ -39,9 +40,9 @@ constexpr uint8_t glyphs[][5] = {
 };
 
 uint16_t panelColor(uint16_t rgb565) { return static_cast<uint16_t>((rgb565 << 8) | (rgb565 >> 8)); }
-void clear(uint16_t color) { std::fill_n(frame, LCD_W * LCD_H, panelColor(color)); }
+void clear(uint16_t color) { if (frame) std::fill_n(frame, LCD_W * LCD_H, panelColor(color)); }
 void pixel(int x, int y, uint16_t color) {
-  if (x >= 0 && x < LCD_W && y >= 0 && y < LCD_H) frame[y * LCD_W + x] = panelColor(color);
+  if (frame && x >= 0 && x < LCD_W && y >= 0 && y < LCD_H) frame[y * LCD_W + x] = panelColor(color);
 }
 const uint8_t *glyphFor(char c) {
   if (c >= 'a' && c <= 'z') c -= 32;
@@ -61,10 +62,12 @@ void centered(const char *text, int y, int scale, uint16_t color) {
   int x = (LCD_W - static_cast<int>(shown.length()) * 6 * scale + scale) / 2;
   for (char c : shown) { drawChar(x, y, c, scale, color); x += 6 * scale; }
 }
-void present() { if (panel) { esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, LCD_H, frame); delay(20); } }
+void present() { if (panel && frame) { esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, LCD_H, frame); delay(20); } }
 }
 
 void initDisplay() {
+  frame = static_cast<uint16_t *>(heap_caps_malloc(LCD_W * LCD_H * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (!frame) abort();
   pinMode(PIN_TFT_BL, OUTPUT); digitalWrite(PIN_TFT_BL, HIGH);
   spi_bus_config_t bus = ST7735_PANEL_BUS_SPI_CONFIG(PIN_TFT_SCLK, PIN_TFT_MOSI, LCD_W * LCD_H * sizeof(uint16_t));
   ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
@@ -86,6 +89,14 @@ void initDisplay() {
   clear(0x07FF); present(); delay(350);
   displayAwake = true; displayTouchedAt = millis();
   FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1); FastLED.setBrightness(24);
+}
+
+void releaseDisplayMemoryForWps() {
+  if (panel) { esp_lcd_panel_del(panel); panel = nullptr; }
+  if (panelIo) { esp_lcd_panel_io_del(panelIo); panelIo = nullptr; }
+  spi_bus_free(LCD_HOST);
+  if (frame) { heap_caps_free(frame); frame = nullptr; }
+  displayAwake = false;
 }
 
 void displayMessage(const char *title, const char *line1, const char *line2) {
