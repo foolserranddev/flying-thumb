@@ -92,6 +92,12 @@ public sealed class FlyingThumbClient
         using var response=await http.SendAsync(Request(d,HttpMethod.Post,"api/files/commit",key,new StringContent("")));
         await EnsureSuccessAsync(response,"Refresh USB file view");
     }
+    public async Task ReleaseManagedUsbAsync(Device d,string key)
+    {
+        if(d.IsSimulated)return;
+        using var response=await http.SendAsync(Request(d,HttpMethod.Post,"api/files/release",key,new StringContent("")));
+        await EnsureSuccessAsync(response,"Return USB to writable mode");
+    }
 
     public async Task UpgradeFirmwareAsync(Device d,string firmwarePath,string key)
     {

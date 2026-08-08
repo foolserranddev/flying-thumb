@@ -110,7 +110,7 @@ bool beginUsbFileUpdate() {
     msc.mediaPresent(true);
     delay(250);
     usbManagedMode = true;
-    displayMessage("MANAGED MODE", "USB read-only", "Replug: writable");
+    displayMessage("MANAGED MODE", "USB read-only", "Manager: release");
   }
   usbUpdateActive = true;
   return true;
@@ -129,6 +129,28 @@ void finishUsbFileUpdate() {
 
 bool usbFileUpdateActive() { return usbUpdateActive; }
 bool usbManagedModeActive() { return usbManagedMode; }
+
+bool releaseUsbManagedMode() {
+  if (!usbDiskReady || usbUpdateActive) return false;
+  if (!usbManagedMode) return true;
+  usbWritesBlocked = true;
+  msc.mediaPresent(false);
+  delay(750);
+  SD_MMC.end();
+  delay(100);
+  if (!SD_MMC.begin("/sdcard", false)) {
+    usbDiskReady = false;
+    displayMessage("TF CARD ERROR", "USB release failed", "Replug device");
+    return false;
+  }
+  msc.isWritable(true);
+  usbManagedMode = false;
+  usbWritesBlocked = false;
+  msc.mediaPresent(true);
+  delay(250);
+  displayMessage("USB WRITABLE", "Manager released", "WiFi ready");
+  return true;
+}
 
 void setup() {
   Serial.begin(115200); pinMode(PIN_BUTTON, INPUT_PULLUP); initDisplay();

@@ -244,6 +244,7 @@ public sealed class MainForm : Form
         device.DropDownItems.Add(Item("Select None", (_, _) => SelectAll(false)));
         device.DropDownItems.Add(new ToolStripSeparator());
         device.DropDownItems.Add(Item("Rename Selected Drive...", RenameDevice));
+        device.DropDownItems.Add(Item("Return USB to Writable Mode...", async (_, _) => await ReleaseManagedUsb()));
         var settings = new ToolStripMenuItem("Settings");
         settings.DropDownItems.Add(Item("Shop Management Key...", EditShopKey));
         menu.Items.AddRange([file, device, settings]);
@@ -302,22 +303,24 @@ public sealed class MainForm : Form
         fileGrid.MultiSelect = true; fileGrid.RowHeadersVisible = false; fileGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill; fileGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         ApplyExplorerGridStyle(fileGrid);
         var menu = new ContextMenuStrip();
-        var syncFile = new ToolStripMenuItem("Sync this file...");
+        var syncFiles = new ToolStripMenuItem("Sync selected files...");
         var delete = new ToolStripMenuItem("Delete") { ShortcutKeyDisplayString = "Del" };
-        syncFile.Click += async (_, _) => await SyncSelectedFile();
+        syncFiles.Click += async (_, _) => await SyncSelectedFiles();
         delete.Click += async (_, _) => await DeleteSelectedFiles();
-        menu.Items.Add(syncFile); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add(delete);
-        menu.Opening += (_, e) => { syncFile.Enabled = !busy && fileGrid.SelectedRows.Count == 1; delete.Enabled = !busy && fileGrid.SelectedRows.Count > 0; e.Cancel = fileGrid.SelectedRows.Count == 0; };
+        menu.Items.Add(syncFiles); menu.Items.Add(new ToolStripSeparator()); menu.Items.Add(delete);
+        menu.Opening += (_, e) => { var count = fileGrid.SelectedRows.Count; syncFiles.Text = count == 1 ? "Sync this file..." : "Sync selected files..."; syncFiles.Enabled = delete.Enabled = !busy && count > 0; e.Cancel = count == 0; };
         fileGrid.ContextMenuStrip = menu;
         fileGrid.CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0 && !fileGrid.Rows[e.RowIndex].Selected) { fileGrid.ClearSelection(); fileGrid.Rows[e.RowIndex].Selected = true; fileGrid.CurrentCell = fileGrid.Rows[e.RowIndex].Cells[0]; } };
         fileGrid.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Delete && !busy) { e.Handled = true; e.SuppressKeyPress = true; await DeleteSelectedFiles(); } };
     }
 
-    static bool UsesManagedUsb(Device device)
+    static bool FirmwareAtLeast(Device device, int major, int minor, int build)
     {
         var clean = device.Firmware.Split('-', 2)[0];
-        return Version.TryParse(clean, out var version) && version >= new Version(2, 2, 0);
+        return Version.TryParse(clean, out var version) && version >= new Version(major, minor, build);
     }
+    static bool UsesManagedUsb(Device device) => FirmwareAtLeast(device, 2, 2, 0);
+    static bool SupportsUsbRelease(Device device) => FirmwareAtLeast(device, 2, 3, 0);
     static string ReadyStatus(Device device) => device.IsSimulated ? "Simulated" : device.UsbManaged ? "Manager controls files - USB read-only" : "Ready";
     bool EnsureManagedFirmware(Device[] targets)
     {
@@ -334,8 +337,36 @@ public sealed class MainForm : Form
         if (switching == 0) return true;
         var noun = switching == 1 ? "drive" : "drives";
         return MessageBox.Show(this,
-            $"This will place {switching} {noun} in managed mode. USB becomes read-only for the rest of this plug-in session while Flying Thumb Manager controls file changes.\n\nClose any files currently being written through USB. Unplug and reconnect the Flying Thumb later to restore normal writable thumb-drive mode.",
+            $"This will place {switching} {noun} in managed mode. USB becomes read-only while Flying Thumb Manager controls file changes.\n\nClose any files currently being written through USB. Afterward, choose Devices > Return USB to Writable Mode (firmware 2.3 or newer), or unplug and reconnect the Flying Thumb.",
             "Begin Managed File Session", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK;
+    }
+    async Task ReleaseManagedUsb()
+    {
+        if (busy) return;
+        var targets = SelectedDevices().Where(device => !device.IsSimulated && device.UsbManaged).ToArray();
+        if (targets.Length == 0)
+        {
+            MessageBox.Show(this, "None of the included drives are currently in Manager-controlled read-only mode.", "USB Already Writable", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var outdated = targets.Where(device => !SupportsUsbRelease(device)).Select(device => device.Name).ToArray();
+        if (outdated.Length > 0)
+        {
+            MessageBox.Show(this, "A drive update is required before writable USB can be restored without unplugging: " + string.Join(", ", outdated) + ".\n\nChoose File > Check for Updates, install the drive update, then try again.", "Drive Update Required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        var noun = targets.Length == 1 ? "drive" : "drives";
+        if (MessageBox.Show(this, $"Return {targets.Length} included {noun} to normal writable USB mode?\n\nClose any files currently open from the Flying Thumb on the attached machine. Its USB disk will briefly disappear and reconnect as writable. The next Manager file change will place it back into managed read-only mode.", "Return USB to Writable Mode", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+
+        var succeeded = await RunForDevices(targets, async device =>
+        {
+            SetStatus(device, "Returning USB to writable mode...");
+            await client.ReleaseManagedUsbAsync(device, Key);
+            device.UsbManaged = false;
+            return "USB writable";
+        });
+        summary.Text = succeeded ? $"USB is writable on {targets.Length} {noun}" : "One or more drives could not return to writable USB mode";
+        deviceGrid.Refresh();
     }
     string Key => managementKey;
     Device[] SelectedDevices() { deviceGrid.EndEdit(); return devices.Where(x => x.Selected).ToArray(); }
@@ -519,10 +550,15 @@ public sealed class MainForm : Form
         await SyncAcrossDevices();
     }
 
-    async Task SyncSelectedFile()
+    async Task SyncSelectedFiles()
     {
-        var name = fileGrid.SelectedRows.Count == 1 ? fileGrid.SelectedRows[0].Cells[0].Value?.ToString() : null;
-        if (!string.IsNullOrWhiteSpace(name)) await SyncAcrossDevices(Path.GetFileName(name));
+        var names = fileGrid.SelectedRows.Cast<DataGridViewRow>()
+            .Select(row => row.Cells.Count > 0 ? row.Cells[0].Value?.ToString() : null)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => Path.GetFileName(name!))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (names.Length > 0) await SyncAcrossDevices(names);
     }
     async Task DeleteSelectedFiles()
     {
@@ -548,7 +584,7 @@ public sealed class MainForm : Form
         var preview = string.Join("\n", names.Take(8).Select(name => "  " + name));
         if (names.Length > 8) preview += $"\n  ...and {names.Length - 8} more";
         var switching = targets.Count(device => !device.IsSimulated && !device.UsbManaged);
-        var modeNote = switching > 0 ? $"\n\n{switching} drive{(switching == 1 ? "" : "s")} will enter managed mode; the attached machine's USB access becomes read-only until replugged. Flying Thumb Manager retains write access." : "";
+        var modeNote = switching > 0 ? $"\n\n{switching} drive{(switching == 1 ? "" : "s")} will enter managed mode; the attached machine's USB access becomes read-only until released from the Devices menu or replugged. Flying Thumb Manager retains write access." : "";
         if (MessageBox.Show(this, $"Permanently delete {names.Length} selected file{(names.Length == 1 ? "" : "s")} ({copies} total {copyWord}) from the included drives?\n\n{preview}{modeNote}\n\nThis cannot be undone.", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
 
         SetBusy(true);
@@ -698,7 +734,7 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "The batch continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb File Transfer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
-    async Task SyncAcrossDevices(string? onlyFile = null)
+    async Task SyncAcrossDevices(IReadOnlyCollection<string>? onlyFiles = null)
     {
         if (busy) return;
         var targets = SelectedDevices();
@@ -707,7 +743,8 @@ public sealed class MainForm : Form
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
-        WriteLog(onlyFile is null ? $"Building an additive sync plan across {targets.Length} drives..." : $"Building a sync plan for {onlyFile} across {targets.Length} drives...");
+        var selectedNames = onlyFiles?.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        WriteLog(selectedNames is null ? $"Building an additive sync plan across {targets.Length} drives..." : $"Building a sync plan for {selectedNames.Count} selected file(s) across {targets.Length} drives...");
         var current = new Dictionary<string, List<RemoteFile>>(StringComparer.OrdinalIgnoreCase);
         try
         {
@@ -720,11 +757,11 @@ public sealed class MainForm : Form
         }
 
         var names = current.Values.SelectMany(files => files).Where(file => file.Type == "file").Select(file => Path.GetFileName(file.Name)).Distinct(StringComparer.OrdinalIgnoreCase);
-        if (onlyFile is not null) names = names.Where(name => string.Equals(name, onlyFile, StringComparison.OrdinalIgnoreCase));
+        if (selectedNames is not null) names = names.Where(selectedNames.Contains);
         var namesToSync = names.ToArray();
         if (namesToSync.Length == 0)
         {
-            SetBusy(false); summary.Text = onlyFile is null ? "No files found to sync" : $"{onlyFile} is no longer in the file view"; WriteLog("No matching files were found; USB mode was not changed."); return;
+            SetBusy(false); summary.Text = selectedNames is null ? "No files found to sync" : "The selected files are no longer in the file view"; WriteLog("No matching files were found; USB mode was not changed."); return;
         }
 
         var plan = new List<(string Name, (Device Device, RemoteFile File)[] Sources, Device[] Destinations)>();
@@ -742,7 +779,7 @@ public sealed class MainForm : Form
                 {
                     var choices = present.Select((item, index) => $"{index + 1}. {item.Device.Name} - {FormatSize(item.File.Size)}  ({(item.Device.IsSimulated ? "Demo folder" : item.Device.Ip)})").ToArray();
                     SetBusy(false);
-                    var decision = Prompt.ChooseWithApply($"Choose which drive's copy of {name} should win.", "Resolve Sync Conflict", choices, "Apply option to all files", onlyFile is null);
+                    var decision = Prompt.ChooseWithApply($"Choose which drive's copy of {name} should win.", "Resolve Sync Conflict", choices, "Apply option to all files", selectedNames is null || selectedNames.Count > 1);
                     if (decision is null) { summary.Text = "Sync canceled - USB mode unchanged"; WriteLog("Sync was canceled while resolving conflicts; USB mode was not changed."); return; }
                     SetBusy(true);
                     var selected = Array.IndexOf(choices, decision.Value.Choice);
