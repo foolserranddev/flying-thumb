@@ -27,7 +27,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.4.4";
+constexpr char FIRMWARE_VERSION_BASE[]="2.4.5";
 constexpr uint32_t WPS_RETRY_DELAY_MS=1500;
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
