@@ -299,7 +299,7 @@ public sealed class MainForm : Form
         var clean = device.Firmware.Split('-', 2)[0];
         return Version.TryParse(clean, out var version) && version >= new Version(2, 2, 0);
     }
-    static string ReadyStatus(Device device) => device.IsSimulated ? "Simulated" : device.UsbManaged ? "Ready - USB read-only" : "Ready";
+    static string ReadyStatus(Device device) => device.IsSimulated ? "Simulated" : device.UsbManaged ? "Manager controls files - USB read-only" : "Ready";
     bool EnsureManagedFirmware(Device[] targets)
     {
         var outdated = targets.Where(device => !device.IsSimulated && !UsesManagedUsb(device)).Select(device => device.Name).ToArray();
@@ -564,7 +564,6 @@ public sealed class MainForm : Form
         if (targets.Length < 2) { MessageBox.Show("Select at least two drives to sync."); return; }
         if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets)) return;
         if (!EnsureManagedFirmware(targets)) return;
-        if (!ConfirmManagedUsb(targets)) return;
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
@@ -588,6 +587,40 @@ public sealed class MainForm : Form
             return;
         }
 
+        var names = current.Values.SelectMany(x => x).Where(x => x.Type == "file").Select(x => Path.GetFileName(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var plan = new List<(string Name, (Device Device, RemoteFile File)[] Present, Device[] Missing)>();
+        int conflicts = 0;
+        foreach (var name in names)
+        {
+            var present = targets
+                .Select(d => (Device: d, File: current[d.Id].FirstOrDefault(f => string.Equals(Path.GetFileName(f.Name), name, StringComparison.OrdinalIgnoreCase))))
+                .Where(x => x.File is not null)
+                .Select(x => (Device: x.Device, File: x.File!))
+                .ToArray();
+            if (present.Select(x => x.File.Size).Distinct().Count() > 1)
+            {
+                conflicts++;
+                WriteLog($"CONFLICT skipped: {name} has different sizes on different drives.");
+                continue;
+            }
+            var missing = targets.Where(d => !present.Any(x => x.Device.Id == d.Id)).ToArray();
+            if (missing.Length > 0) plan.Add((name, present, missing));
+        }
+
+        var plannedCopies = plan.Sum(item => item.Missing.Length);
+        WriteLog($"Sync plan: {plannedCopies} file copy operation(s), {conflicts} conflict(s).");
+        if (plannedCopies == 0)
+        {
+            SetBusy(false);
+            summary.Text = names.Length == 0 ? "No files found to sync - USB mode unchanged" : $"Already synchronized - USB mode unchanged ({conflicts} conflicts)";
+            WriteLog(names.Length == 0 ? "No files were found on the selected drives; USB mode was not changed." : "No files need copying; USB mode was not changed.");
+            return;
+        }
+
+        SetBusy(false);
+        if (!ConfirmManagedUsb(targets)) return;
+        SetBusy(true);
+
         var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -595,7 +628,11 @@ public sealed class MainForm : Form
         var errors = new List<string>();
         foreach (var device in targets)
         {
-            try { batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key); if (batchMode[device.Id] && UsesManagedUsb(device)) device.UsbManaged = true; }
+            try
+            {
+                batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key);
+                if (batchMode[device.Id] && UsesManagedUsb(device)) device.UsbManaged = true;
+            }
             catch (Exception ex)
             {
                 blocked.Add(device.Id); failed.Add(device.Id);
@@ -604,51 +641,51 @@ public sealed class MainForm : Form
             }
         }
 
-        var names = current.Values.SelectMany(x => x).Where(x => x.Type == "file").Select(x => Path.GetFileName(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        int copied = 0, conflicts = 0;
+        int copied = 0;
         var temp = Path.Combine(Path.GetTempPath(), "FlyingThumb", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
         try
         {
-            foreach (var name in names)
+            foreach (var item in plan)
             {
-                var present = targets.Select(d => (Device: d, File: current[d.Id].FirstOrDefault(f => string.Equals(Path.GetFileName(f.Name), name, StringComparison.OrdinalIgnoreCase)))).Where(x => x.File is not null).ToArray();
-                if (present.Select(x => x.File!.Size).Distinct().Count() > 1)
+                var availableSources = item.Present.Where(x => !blocked.Contains(x.Device.Id)).ToArray();
+                if (availableSources.Length == 0)
                 {
-                    conflicts++;
-                    WriteLog($"CONFLICT skipped: {name} has different sizes on different drives.");
+                    errors.Add($"Could not read {item.Name}: every source drive failed to enter managed mode.");
+                    WriteLog($"FAILED to stage {item.Name}; no prepared source drive is available.");
                     continue;
                 }
-
-                var missing = targets.Where(d => !blocked.Contains(d.Id) && !present.Any(x => x.Device.Id == d.Id)).ToArray();
+                var source = availableSources[0];
+                var missing = item.Missing.Where(d => !blocked.Contains(d.Id)).ToArray();
                 if (missing.Length == 0) continue;
-                var local = Path.Combine(temp, name);
-                try { await client.DownloadAsync(present[0].Device, name, local); }
+                var local = Path.Combine(temp, item.Name);
+                try { await client.DownloadAsync(source.Device, item.Name, local); }
                 catch (Exception ex)
                 {
-                    errors.Add($"Could not read {name} from {present[0].Device.Name}: {ex.Message}");
-                    WriteLog($"FAILED to stage {name}; continuing sync - {ex.Message}");
+                    errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}");
+                    WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}");
                     continue;
                 }
 
                 foreach (var destination in missing)
                 {
-                    SetStatus(destination, $"Syncing {name}...");
+                    SetStatus(destination, $"Syncing {item.Name}...");
                     try
                     {
                         await client.UploadAsync(destination, local, Key);
-                        RecordUploadedFile(destination, name, present[0].File!.Size);
-                        current[destination.Id].Add(new RemoteFile { Name = "/" + name, Size = present[0].File!.Size, Type = "file" });
+                        RecordUploadedFile(destination, item.Name, source.File.Size);
+                        current[destination.Id].Add(new RemoteFile { Name = "/" + item.Name, Size = source.File.Size, Type = "file" });
                         changed.Add(destination.Id);
                         copied++;
                         SetStatus(destination, "Synced");
+                        WriteLog($"{destination.Name}: copied {item.Name}.");
                     }
                     catch (Exception ex)
                     {
                         failed.Add(destination.Id);
-                        errors.Add($"{destination.Name} / {name}: {ex.Message}");
+                        errors.Add($"{destination.Name} / {item.Name}: {ex.Message}");
                         SetStatus(destination, "File failed; continuing sync...");
-                        WriteLog($"{destination.Name}: FAILED to copy {name}; continuing - {ex.Message}");
+                        WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}");
                     }
                 }
             }
@@ -677,7 +714,7 @@ public sealed class MainForm : Form
                 }
             }
 
-            WriteLog($"Additive sync finished: {copied} file copy operation(s), {conflicts} conflict(s), {errors.Count} error(s). USB refreshed once after the complete batch.");
+            WriteLog($"Additive sync finished: {copied} of {plannedCopies} planned file copy operation(s), {conflicts} conflict(s), {errors.Count} error(s). USB refreshed once after the complete batch.");
             SetBusy(false);
             if (legacyChanged.Length > 0)
             {
@@ -817,7 +854,7 @@ public sealed class MainForm : Form
                 if (successfulDrives.Count > 0)
                 {
                     SetBusy(true);
-                    await WaitForReconnectAndRefresh(successfulDrives.ToArray(), "Drive update");
+                    await WaitForReconnectAndRefresh(successfulDrives.ToArray(), "Drive update", rereadFiles: true);
                 }
             }
 
