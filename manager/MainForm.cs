@@ -128,7 +128,7 @@ public sealed class MainForm : Form
         DragDrop += async (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddFiles(paths.Where(File.Exists).ToArray()); };
         split.SizeChanged += (_, _) => ApplyResponsiveSplit();
         setupNetworkTimer.Tick += (_, _) => CheckForSetupNetwork();
-        Shown += async (_, _) => { await RefreshDevices(); await CheckForUpdates(false); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
+        Shown += async (_, _) => { await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
         FormClosing += (_, _) => ManagerSettings.SaveWindowSize(WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size, WindowState == FormWindowState.Maximized);
         FormClosed += (_, _) => setupNetworkTimer.Stop();
     }
@@ -298,7 +298,20 @@ public sealed class MainForm : Form
     Device[] SelectedDevices() { deviceGrid.EndEdit(); return devices.Where(x => x.Selected).ToArray(); }
     void SelectAll(bool selected) { foreach (var d in devices) d.Selected = selected; deviceGrid.Refresh(); RenderFileMatrix(); }
     void WriteLog(string message) { if (InvokeRequired) { BeginInvoke(() => WriteLog(message)); return; } log.AppendText($"{DateTime.Now:t}  {message}{Environment.NewLine}"); }
-    void SetBusy(bool value) { busy = value; addButton.Enabled = syncButton.Enabled = refreshFilesButton.Enabled = updateNowButton.Enabled = !value; UseWaitCursor = value; }
+    void SetBusy(bool value)
+    {
+        busy = value;
+        addButton.Enabled = syncButton.Enabled = refreshFilesButton.Enabled = updateNowButton.Enabled = !value;
+        UseWaitCursor = value;
+        Cursor = value ? Cursors.WaitCursor : Cursors.Default;
+        deviceGrid.UseWaitCursor = value;
+        fileGrid.UseWaitCursor = value;
+        if (!value)
+        {
+            deviceGrid.Cursor = Cursors.Default;
+            fileGrid.Cursor = Cursors.Default;
+        }
+    }
     void SetStatus(Device device, string status) { if (InvokeRequired) { BeginInvoke(() => SetStatus(device, status)); return; } device.Status = status; deviceGrid.Refresh(); summary.Text = $"{device.Name}: {status}"; }
     static string FormatSize(long value) => value >= 1L << 30 ? $"{value / (double)(1L << 30):0.0} GB" : value >= 1L << 20 ? $"{value / (double)(1L << 20):0.0} MB" : value >= 1L << 10 ? $"{value / 1024d:0.0} KB" : $"{value} B";
 
@@ -318,6 +331,7 @@ public sealed class MainForm : Form
         catch (Exception ex) { summary.Text = "Discovery failed"; WriteLog("Discovery failed: " + ex.Message); }
         finally { SetBusy(false); }
         await RefreshFileMatrix();
+        await CheckForUpdates(false);
     }
 
     void ReplaceDevices(IEnumerable<Device> found)
@@ -720,6 +734,22 @@ public sealed class MainForm : Form
         string? downloadedManager = null;
         try
         {
+            // The banner may have been displayed for a while. Refresh immediately
+            // before downloading so the published hashes cannot be stale.
+            summary.Text = "Confirming the latest update...";
+            manifest = await UpdateService.GetLatestAsync();
+            outdatedDrives = DrivesNeedingUpdate(manifest);
+            managerNeedsUpdate = UpdateService.IsNewer(manifest.Manager.Version, UpdateService.CurrentManagerVersion);
+
+            if (outdatedDrives.Length == 0 && !managerNeedsUpdate)
+            {
+                availableUpdate = null;
+                updateBanner.Visible = false;
+                summary.Text = "Everything is up to date";
+                MessageBox.Show(this, "Flying Thumb Manager and all discovered drives are up to date.", "Flying Thumb Updates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             if (outdatedDrives.Length > 0)
             {
                 summary.Text = "Downloading drive update...";
