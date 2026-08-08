@@ -23,11 +23,14 @@ try {
     Copy-Item -LiteralPath "$managerPublish\FlyingThumbManager.exe" -Destination $managerExe -Force
     Copy-Item -LiteralPath "$firmwareBuild\firmware.bin" -Destination $wifiImage -Force
 
+    $managerVersion = ([xml](Get-Content manager\FlyingThumbManager.csproj -Raw)).Project.PropertyGroup.Version
+    $firmwareVersion = [regex]::Match((Get-Content src\fileserver.cpp -Raw), 'FIRMWARE_VERSION_BASE\[\]="([^"]+)"').Groups[1].Value
     $package = Join-Path $root "work\manager-package"
     New-Item -ItemType Directory -Force -Path $package,"$package\assets" | Out-Null
     Copy-Item -LiteralPath $managerExe -Destination "$package\FlyingThumbManager.exe" -Force
     Copy-Item -LiteralPath $wifiImage -Destination "$package\FlyingThumb-v2-wifi-update.bin" -Force
     Copy-Item -LiteralPath $fullImage -Destination "$package\FlyingThumb-v2-full.bin" -Force
+    $firmwareVersion | Set-Content -LiteralPath "$package\firmware-version.txt" -Encoding ascii
     Copy-Item -LiteralPath "manager\assets\flying-thumb.png" -Destination "$package\assets\flying-thumb.png" -Force
     $flasherCandidates = @("dist\manager\FlyingThumbEsptool.exe", "work\esptool\FlyingThumbEsptool.exe", "work\esptool\dist\FlyingThumbEsptool.exe")
     $flasher = $flasherCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -35,15 +38,13 @@ try {
     "Run FlyingThumbManager.exe. Use File > Install / Recover via USB for first installation, or Check for Updates for existing drives." | Set-Content -LiteralPath "$package\README.txt" -Encoding utf8
     Compress-Archive -Path "$package\*" -DestinationPath "$output\FlyingThumbManager-Windows.zip" -Force
 
-    $managerVersion = ([xml](Get-Content manager\FlyingThumbManager.csproj -Raw)).Project.PropertyGroup.Version
-    $firmwareVersion = [regex]::Match((Get-Content src\fileserver.cpp -Raw), 'FIRMWARE_VERSION_BASE\[\]="([^"]+)"').Groups[1].Value
     $base = "https://github.com/foolserranddev/flying-thumb/releases/latest/download"
     $manifest = [ordered]@{
         schema = 1
         manager = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbManager.exe"; sha256 = (Get-FileHash $managerExe -Algorithm SHA256).Hash }
         firmware = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-wifi-update.bin"; sha256 = (Get-FileHash $wifiImage -Algorithm SHA256).Hash }
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
-        notes = "Fix WPS provisioning with a clean radio transition, a two-minute automatic retry window, actionable diagnostics, and reliable WPS credential persistence across reboots."
+        notes = "Make USB Recovery download and verify the latest firmware, show the exact firmware version and image source throughout recovery, and identify the Manager version in its activity log."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

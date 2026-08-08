@@ -18,7 +18,7 @@ Flying Thumb turns a **LILYGO T-Dongle-S3** and microSD card into a Wi-Fi-manage
 
 ## First installation and USB recovery
 
-Run **`dist/manager/FlyingThumbManager.exe`** and choose **Install / Recover USB**. The manager walks through the button-hold insertion, detects the recovery COM port, and writes the complete firmware image. It requires no Python, PlatformIO, VS Code, or internet connection and does not format or erase the microSD card.
+Run **`dist/manager/FlyingThumbManager.exe`** and choose **Install / Recover USB**. The manager checks for and verifies the latest recovery firmware before walking through the button-hold insertion, detecting the recovery COM port, and writing the complete image. Its confirmation and activity log state the exact firmware version, image source, and size. If internet access is unavailable, it explicitly identifies and uses the version bundled beside the Manager. Recovery requires no Python, PlatformIO, or VS Code and does not format or erase the microSD card.
 
 Use this same path to recover a dongle locally if a wireless firmware upgrade is interrupted or the installed firmware cannot boot. The separate **`Flash Flying Thumb.cmd`** development script remains available as a backup on a development PC.
 ## Set up each dongle

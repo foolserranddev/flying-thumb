@@ -134,7 +134,7 @@ public sealed class MainForm : Form
         DragDrop += async (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddFiles(paths.Where(File.Exists).ToArray()); };
         split.SizeChanged += (_, _) => ApplyResponsiveSplit();
         setupNetworkTimer.Tick += (_, _) => CheckForSetupNetwork();
-        Shown += async (_, _) => { await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
+        Shown += async (_, _) => { WriteLog($"Flying Thumb Manager {UpdateService.CurrentManagerVersion} started."); await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
         FormClosing += (_, _) => ManagerSettings.SaveWindowSize(WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size, WindowState == FormWindowState.Maximized);
         FormClosed += (_, _) => setupNetworkTimer.Stop();
     }
@@ -1085,10 +1085,52 @@ public sealed class MainForm : Form
         return key?.GetValueNames().Select(n => key.GetValue(n)?.ToString()).Where(v => !string.IsNullOrWhiteSpace(v)).Cast<string>().Distinct(StringComparer.OrdinalIgnoreCase).Order().ToArray() ?? [];
     }
 
+    static string BundledFirmwareVersion()
+    {
+        try
+        {
+            var versionFile = Path.Combine(AppContext.BaseDirectory, "firmware-version.txt");
+            return File.Exists(versionFile) ? File.ReadAllText(versionFile).Trim() : "unknown";
+        }
+        catch { return "unknown"; }
+    }
+
+    async Task<(string Path, string Version, string Source)> ResolveRecoveryImage()
+    {
+        var localImage = Path.Combine(AppContext.BaseDirectory, "FlyingThumb-v2-full.bin");
+        try
+        {
+            summary.Text = "Checking for the latest recovery firmware...";
+            var manifest = await UpdateService.GetLatestAsync();
+            var downloaded = await UpdateService.DownloadVerifiedAsync(manifest.Recovery, "FlyingThumb-v2-full.bin");
+            WriteLog($"Downloaded and verified USB recovery firmware {manifest.Recovery.Version}.");
+            try
+            {
+                File.Copy(downloaded, localImage, true);
+                File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "firmware-version.txt"), manifest.Recovery.Version);
+            }
+            catch (Exception ex) { WriteLog("Could not cache the verified recovery image locally - " + ex.Message); }
+            return (downloaded, manifest.Recovery.Version, "latest verified download");
+        }
+        catch (Exception ex)
+        {
+            if (!File.Exists(localImage)) throw new InvalidOperationException("The latest recovery firmware could not be downloaded and no bundled recovery image is available.", ex);
+            var version = BundledFirmwareVersion();
+            WriteLog($"Latest recovery check unavailable; using bundled firmware {version} - {ex.Message}");
+            return (localImage, version, "bundled offline image");
+        }
+    }
+
     async void RecoverUsb(object? sender, EventArgs e)
     {
-        var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe"); var image = Path.Combine(AppContext.BaseDirectory, "FlyingThumb-v2-full.bin");
-        if (!File.Exists(flasher) || !File.Exists(image)) { MessageBox.Show("Recovery files are missing. Re-copy the complete manager folder."); return; }
+        var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
+        if (!File.Exists(flasher)) { MessageBox.Show("The USB recovery tool is missing. Re-copy the complete manager folder."); return; }
+        (string Path, string Version, string Source) recovery;
+        SetBusy(true);
+        try { recovery = await ResolveRecoveryImage(); }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Recovery Firmware Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error); SetBusy(false); return; }
+        SetBusy(false);
+        var image = recovery.Path;
         var before = SerialPorts();
         if (MessageBox.Show("1. Unplug the LILYGO completely.\n\n2. Press and keep holding its button.\n\n3. While still holding it, plug it directly into this PC.\n\n4. Keep holding until Windows detects the USB drive (usually 2-5 seconds), then release.\n\nClick OK afterward.", "USB recovery mode", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
         string? port = null; for (var i = 0; i < 20 && port is null; i++) { var now = SerialPorts(); port = now.Except(before, StringComparer.OrdinalIgnoreCase).FirstOrDefault(); if (port is null && now.Length == 1) port = now[0]; if (port is null) await Task.Delay(500); }
@@ -1103,9 +1145,9 @@ public sealed class MainForm : Form
             port = choices.Length == 1 ? choices[0] : Prompt.Choose("Recovery USB port", "Choose USB port", choices);
             if (string.IsNullOrWhiteSpace(port)) return;
         }
-        if (MessageBox.Show($"Install complete firmware through {port}?\n\nTF-card files will not be erased.", "Confirm USB recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
-        SetBusy(true); tabs.SelectedIndex = 1; WriteLog($"USB recovery started on {port}.");
-        try { var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var a in new[] { "--chip", "esp32s3", "--port", port, "--baud", "921600", "write_flash", "0x0", image }) start.ArgumentList.Add(a); using var process = new Process { StartInfo = start }; process.OutputDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.ErrorDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); await process.WaitForExitAsync(); if (process.ExitCode != 0) throw new InvalidOperationException($"Flashing engine returned error {process.ExitCode}."); WriteLog("USB installation completed successfully."); MessageBox.Show("Installed successfully. Reconnect the LILYGO normally."); }
+        if (MessageBox.Show($"Install Flying Thumb firmware {recovery.Version} through {port}?\n\nSource: {recovery.Source}\nImage size: {new FileInfo(image).Length:N0} bytes\n\nTF-card files will not be erased.", "Confirm USB recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+        SetBusy(true); tabs.SelectedIndex = 1; WriteLog($"USB recovery started on {port}: installing firmware {recovery.Version} from {recovery.Source} ({new FileInfo(image).Length:N0} bytes).");
+        try { var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var a in new[] { "--chip", "esp32s3", "--port", port, "--baud", "921600", "write_flash", "0x0", image }) start.ArgumentList.Add(a); using var process = new Process { StartInfo = start }; process.OutputDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.ErrorDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); await process.WaitForExitAsync(); if (process.ExitCode != 0) throw new InvalidOperationException($"Flashing engine returned error {process.ExitCode}."); WriteLog($"USB installation completed successfully: firmware {recovery.Version} installed and verified."); MessageBox.Show($"Firmware {recovery.Version} installed successfully. Reconnect the LILYGO normally."); }
         catch (Exception ex) { WriteLog("USB recovery FAILED - " + ex.Message); MessageBox.Show("USB installation failed. Repeat the button-hold insertion and try again.\n\n" + ex.Message); }
         finally { SetBusy(false); }
     }
