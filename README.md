@@ -31,9 +31,9 @@ Use this same path to recover a dongle locally if a wireless firmware upgrade is
 
 After restarting, the setup hotspot turns off. The display shows the friendly machine name and IP address but never the joined Wi-Fi name.
 
-A short button press starts WPS. Holding the button for five seconds erases the stored Wi-Fi network and returns the drive to setup mode. The drive name and management key are retained.
+A short button press starts a two-minute WPS pairing window. Flying Thumb automatically retries transient WPS failures while you press the router's WPS button; the display distinguishes a timeout from the overlap caused by multiple routers advertising WPS. Holding the button for five seconds erases the stored Wi-Fi network and returns the drive to setup mode. The drive name and management key are retained.
 
-The LCD and backlight turn off after three minutes without a status change or button press. A short press while the screen is off only wakes the display; it does not start WPS. Holding for five seconds still performs the Wi-Fi reset. On an established Wi-Fi connection, firmware 2.4.0 uses maximum modem sleep: the radio wakes for access-point beacons and queued traffic, keeping discovery and file access available while reducing idle radio power. Setup access-point mode remains fully awake.
+The LCD and backlight turn off after three minutes without a status change or button press. A short press while the screen is off only wakes the display; it does not start WPS. Holding for five seconds still performs the Wi-Fi reset. On an established Wi-Fi connection, firmware 2.4.0 and later use maximum modem sleep: the radio wakes for access-point beacons and queued traffic, keeping discovery and file access available while reducing idle radio power. Setup access-point mode remains fully awake.
 
 ## Flying Thumb Manager
 
