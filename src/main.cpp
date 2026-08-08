@@ -11,11 +11,14 @@
 
 USBMSC msc;
 namespace {
-uint32_t lastRead = 0, lastWrite = 0, pressedAt = 0;
+volatile uint32_t lastRead = 0, lastWrite = 0;
+uint32_t pressedAt = 0;
 bool resetHandled = false;
-bool usbDiskReady = false, usbUpdateActive = false;
+bool usbDiskReady = false, usbUpdateActive = false, usbManagedMode = false;
+volatile bool usbWritesBlocked = false;
 
 int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
+  if (usbWritesBlocked) return -1;
   const uint32_t sector = SD_MMC.sectorSize();
   if (!sector || sector > 512) return -1;
   uint8_t scratch[512];
@@ -63,6 +66,7 @@ bool onStartStop(uint8_t, bool, bool) { return true; }
 void startUsbDisk() {
   msc.vendorID("FlyingThumb"); msc.productID("WiFi Storage"); msc.productRevision("1.0");
   msc.onRead(onRead); msc.onWrite(onWrite); msc.onStartStop(onStartStop);
+  msc.isWritable(true);
   msc.mediaPresent(true);
   usbDiskReady = msc.begin(SD_MMC.numSectors(), SD_MMC.sectorSize());
   if (usbDiskReady) USB.begin();
@@ -86,22 +90,45 @@ void serviceButton() {
 bool beginUsbFileUpdate() {
   if (!usbDiskReady) return false;
   if (usbUpdateActive) return true;
-  msc.mediaPresent(false);
-  delay(75);
-  tud_disconnect();
-  delay(250);
+  usbWritesBlocked = true;
+  if (!usbManagedMode) {
+    // Stop accepting new host writes, allow any callback already in flight to
+    // finish, then make Windows/machine hosts re-query write protection.
+    delay(500);
+    msc.isWritable(false);
+    msc.mediaPresent(false);
+    delay(750);
+    // USB may have changed FAT metadata since boot. Remount before using the
+    // file-level API so it cannot operate from a stale filesystem cache.
+    SD_MMC.end();
+    delay(100);
+    if (!SD_MMC.begin("/sdcard", false)) {
+      usbDiskReady = false;
+      displayMessage("TF CARD ERROR", "Managed mode failed", "Replug device");
+      return false;
+    }
+    msc.mediaPresent(true);
+    delay(250);
+    usbManagedMode = true;
+    displayMessage("MANAGED MODE", "USB read-only", "Replug: writable");
+  }
   usbUpdateActive = true;
   return true;
 }
 
 void finishUsbFileUpdate() {
   if (!usbDiskReady || !usbUpdateActive) return;
+  // Keep USB electrically connected. A logical media change makes the host
+  // discard cached FAT metadata and reload the completed read-only volume.
+  msc.mediaPresent(false);
+  delay(750);
+  msc.isWritable(false);
   msc.mediaPresent(true);
-  tud_connect();
   usbUpdateActive = false;
 }
 
 bool usbFileUpdateActive() { return usbUpdateActive; }
+bool usbManagedModeActive() { return usbManagedMode; }
 
 void setup() {
   Serial.begin(115200); pinMode(PIN_BUTTON, INPUT_PULLUP); initDisplay();

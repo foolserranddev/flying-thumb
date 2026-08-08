@@ -294,6 +294,30 @@ public sealed class MainForm : Form
         ApplyExplorerGridStyle(fileGrid);
     }
 
+    static bool UsesManagedUsb(Device device)
+    {
+        var clean = device.Firmware.Split('-', 2)[0];
+        return Version.TryParse(clean, out var version) && version >= new Version(2, 2, 0);
+    }
+    static string ReadyStatus(Device device) => device.IsSimulated ? "Simulated" : device.UsbManaged ? "Ready - USB read-only" : "Ready";
+    bool EnsureManagedFirmware(Device[] targets)
+    {
+        var outdated = targets.Where(device => !device.IsSimulated && !UsesManagedUsb(device)).Select(device => device.Name).ToArray();
+        if (outdated.Length == 0) return true;
+        MessageBox.Show(this,
+            "Update required before changing files on: " + string.Join(", ", outdated) + ".\n\nFile changes are disabled on older firmware to protect the TF card while USB is attached. Choose File > Check for Updates, install the drive update, then try again.",
+            "Drive Update Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
+    }
+    bool ConfirmManagedUsb(Device[] targets)
+    {
+        var switching = targets.Count(device => !device.IsSimulated && UsesManagedUsb(device) && !device.UsbManaged);
+        if (switching == 0) return true;
+        var noun = switching == 1 ? "drive" : "drives";
+        return MessageBox.Show(this,
+            $"This will place {switching} {noun} in managed mode. USB becomes read-only for the rest of this plug-in session while Flying Thumb Manager controls file changes.\n\nClose any files currently being written through USB. Unplug and reconnect the Flying Thumb later to restore normal writable thumb-drive mode.",
+            "Begin Managed File Session", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK;
+    }
     string Key => managementKey;
     Device[] SelectedDevices() { deviceGrid.EndEdit(); return devices.Where(x => x.Selected).ToArray(); }
     void SelectAll(bool selected) { foreach (var d in devices) d.Selected = selected; deviceGrid.Refresh(); RenderFileMatrix(); }
@@ -398,7 +422,7 @@ public sealed class MainForm : Form
         inventories.Clear();
         await Task.WhenAll(devices.Select(async d =>
         {
-            try { inventories[d.Id] = await client.ListAsync(d, Key); SetStatus(d, d.IsSimulated ? "Simulated" : "Ready"); }
+            try { inventories[d.Id] = await client.ListAsync(d, Key); SetStatus(d, ReadyStatus(d)); }
             catch (Exception ex) { inventories[d.Id] = []; SetStatus(d, "Unavailable"); WriteLog($"{d.Name}: could not read files - {ex.Message}"); }
         }));
         SetBusy(false);
@@ -442,6 +466,8 @@ public sealed class MainForm : Form
         var targets = SelectedDevices();
         if (targets.Length == 0) { MessageBox.Show("Select at least one drive first."); return; }
         if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets)) return;
+        if (!EnsureManagedFirmware(targets)) return;
+        if (!ConfirmManagedUsb(targets)) return;
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
@@ -455,7 +481,7 @@ public sealed class MainForm : Form
 
         foreach (var device in targets)
         {
-            try { batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key); }
+            try { batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key); if (batchMode[device.Id] && UsesManagedUsb(device)) device.UsbManaged = true; }
             catch (Exception ex)
             {
                 blocked.Add(device.Id); failed.Add(device.Id);
@@ -493,8 +519,8 @@ public sealed class MainForm : Form
             try { await client.CommitFileBatchAsync(device, Key); }
             catch (Exception ex)
             {
-                failed.Add(device.Id); errors.Add($"{device.Name} / USB reconnect: {ex.Message}");
-                WriteLog($"{device.Name}: USB reconnect failed - {ex.Message}");
+                failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}");
+                WriteLog($"{device.Name}: USB refresh failed - {ex.Message}");
             }
         }
 
@@ -516,7 +542,7 @@ public sealed class MainForm : Form
             SetBusy(true);
             await WaitForReconnectAndRefresh(legacyChanged, "File transfer");
         }
-        foreach (var device in devices.Where(d => modernSessions.Any(m => m.Id == d.Id) && !failed.Contains(d.Id))) SetStatus(device, device.IsSimulated ? "Simulated" : "Ready");
+        foreach (var device in devices.Where(d => modernSessions.Any(m => m.Id == d.Id) && !failed.Contains(d.Id))) SetStatus(device, ReadyStatus(device));
         foreach (var device in devices.Where(d => failed.Contains(d.Id))) SetStatus(device, "Transfer incomplete");
         RenderFileMatrix();
 
@@ -537,6 +563,8 @@ public sealed class MainForm : Form
         var targets = SelectedDevices();
         if (targets.Length < 2) { MessageBox.Show("Select at least two drives to sync."); return; }
         if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets)) return;
+        if (!EnsureManagedFirmware(targets)) return;
+        if (!ConfirmManagedUsb(targets)) return;
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
@@ -567,7 +595,7 @@ public sealed class MainForm : Form
         var errors = new List<string>();
         foreach (var device in targets)
         {
-            try { batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key); }
+            try { batchMode[device.Id] = await client.BeginFileBatchAsync(device, Key); if (batchMode[device.Id] && UsesManagedUsb(device)) device.UsbManaged = true; }
             catch (Exception ex)
             {
                 blocked.Add(device.Id); failed.Add(device.Id);
@@ -632,8 +660,8 @@ public sealed class MainForm : Form
                 try { await client.CommitFileBatchAsync(device, Key); }
                 catch (Exception ex)
                 {
-                    failed.Add(device.Id); errors.Add($"{device.Name} / USB reconnect: {ex.Message}");
-                    WriteLog($"{device.Name}: USB reconnect failed - {ex.Message}");
+                    failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}");
+                    WriteLog($"{device.Name}: USB refresh failed - {ex.Message}");
                 }
             }
 
@@ -656,7 +684,7 @@ public sealed class MainForm : Form
                 SetBusy(true);
                 await WaitForReconnectAndRefresh(legacyChanged, "Sync");
             }
-            foreach (var device in devices.Where(d => modernSessions.Any(m => m.Id == d.Id) && !failed.Contains(d.Id))) SetStatus(device, device.IsSimulated ? "Simulated" : "Ready");
+            foreach (var device in devices.Where(d => modernSessions.Any(m => m.Id == d.Id) && !failed.Contains(d.Id))) SetStatus(device, ReadyStatus(device));
             foreach (var device in devices.Where(d => failed.Contains(d.Id))) SetStatus(device, "Sync incomplete");
             RenderFileMatrix();
             summary.Text = errors.Count == 0 ? $"Sync complete - {copied} copies, {conflicts} conflicts" : $"Sync finished with {errors.Count} error(s)";

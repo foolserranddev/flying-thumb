@@ -61,7 +61,7 @@ public sealed class FlyingThumbClient
         if(d.IsSimulated)return true;
         using var response=await http.SendAsync(Request(d,HttpMethod.Post,"api/files/begin",key,new StringContent("")));
         if(response.StatusCode==System.Net.HttpStatusCode.NotFound)return false;
-        await EnsureSuccessAsync(response,"Prepare USB file update");
+        await EnsureSuccessAsync(response,"Prepare managed file update");
         return true;
     }
 
@@ -69,7 +69,7 @@ public sealed class FlyingThumbClient
     {
         if(d.IsSimulated)return;
         using var response=await http.SendAsync(Request(d,HttpMethod.Post,"api/files/commit",key,new StringContent("")));
-        await EnsureSuccessAsync(response,"Reconnect USB storage");
+        await EnsureSuccessAsync(response,"Refresh USB file view");
     }
 
     public async Task UpgradeFirmwareAsync(Device d,string firmwarePath,string key)

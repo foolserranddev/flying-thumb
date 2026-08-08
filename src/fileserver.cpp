@@ -25,11 +25,11 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.1.4";
+constexpr char FIRMWARE_VERSION_BASE[]="2.2.0";
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
 WebServer server(80); DNSServer dns; WiFiUDP discovery; Preferences prefs; File uploadFile;
-String savedSsid,savedPassword,setupSsid,deviceId,deviceName,managementKey,uploadPath,uploadError;
+String savedSsid,savedPassword,setupSsid,deviceId,deviceName,managementKey,uploadPath,uploadTempPath,uploadBackupPath,uploadError;
 bool restartPending=false; bool firmwareUploadOk=false; bool uploadOk=false; bool setupDnsActive=false; bool fileBatchActive=false; bool standaloneUsbUpdate=false; size_t uploadBytes=0; uint32_t restartAt=0,fileBatchTouchedAt=0;
 
 String makeDeviceId(){char v[10];snprintf(v,sizeof(v),"FT-%06X",(uint32_t)(ESP.getEfuseMac()&0xffffff));return String(v);}
@@ -44,9 +44,9 @@ void saveNetwork(const String&s,const String&p){prefs.begin("network",false);pre
 void saveDevice(){prefs.begin("device",false);prefs.putString("name",deviceName);prefs.putString("key",managementKey);prefs.end();}
 void scheduleRestart(){restartPending=true;restartAt=millis()+900;}
 void finishStandaloneUsbUpdate(){if(standaloneUsbUpdate){standaloneUsbUpdate=false;finishUsbFileUpdate();}}
-void beginFileBatch(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}if(!fileBatchActive&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not be paused\"}");return;}fileBatchActive=true;fileBatchTouchedAt=millis();server.send(200,"application/json","{\"status\":\"batch-ready\"}");}
-void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;server.send(200,"application/json","{\"status\":\"usb-reconnecting\"}");finishUsbFileUpdate();}
-void showConnected(){String ip=WiFi.localIP().toString(),status="USB / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}
+void beginFileBatch(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}if(!fileBatchActive&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not enter managed mode\"}");return;}fileBatchActive=true;fileBatchTouchedAt=millis();server.send(200,"application/json","{\"status\":\"batch-ready\"}");}
+void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;server.send(200,"application/json","{\"status\":\"usb-refreshing\"}");finishUsbFileUpdate();}
+void showConnected(){String ip=WiFi.localIP().toString(),status="USB RW / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}
 void startDiscovery(){String h=makeHostName(),version=firmwareVersion();if(MDNS.begin(h.c_str())){MDNS.addService("flyingthumb","tcp",80);MDNS.addServiceTxt("flyingthumb","tcp","id",deviceId.c_str());MDNS.addServiceTxt("flyingthumb","tcp","name",deviceName.c_str());MDNS.addServiceTxt("flyingthumb","tcp","version",version.c_str());}discovery.begin(DISCOVERY_PORT);}
 void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
 void onWifiEvent(WiFiEvent_t e){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS){esp_wifi_wps_disable();WiFi.begin();delay(100);savedSsid=WiFi.SSID();savedPassword=WiFi.psk();saveNetwork(savedSsid,savedPassword);}else if(e==ARDUINO_EVENT_WPS_ER_FAILED||e==ARDUINO_EVENT_WPS_ER_TIMEOUT){esp_wifi_wps_disable();displayMessage("WPS FAILED","Short press","to retry");}}
@@ -55,13 +55,83 @@ void sendSettings(){server.sendHeader("Cache-Control","no-store");server.send_P(
 void sendCaptivePortal(){server.sendHeader("Cache-Control","no-store");server.sendHeader("Location","http://192.168.77.1/",true);server.send(302,"text/plain","Open Flying Thumb Setup");}
 void sendWindowsConnectTest(){server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain","Microsoft Connect Test");}
 void sendLegacyWindowsConnectTest(){server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain","Microsoft NCSI");}
-void fillInfo(JsonDocument&d){bool ready=storageReady();uint64_t total=ready?SD_MMC.totalBytes():0,used=ready?SD_MMC.usedBytes():0;d["service"]="flyingthumb";d["protocol"]=1;d["id"]=deviceId;d["name"]=deviceName;d["ip"]=WiFi.getMode()==WIFI_AP?WiFi.softAPIP().toString():WiFi.localIP().toString();d["port"]=80;d["firmware"]=firmwareVersion();d["storageReady"]=ready;d["storageTotal"]=total;d["storageFree"]=total-used;d["claimed"]=managementKey.length()>0;d["setupMode"]=WiFi.getMode()==WIFI_AP;}
+void fillInfo(JsonDocument&d){bool ready=storageReady();uint64_t total=ready?SD_MMC.totalBytes():0,used=ready?SD_MMC.usedBytes():0;d["service"]="flyingthumb";d["protocol"]=1;d["id"]=deviceId;d["name"]=deviceName;d["ip"]=WiFi.getMode()==WIFI_AP?WiFi.softAPIP().toString():WiFi.localIP().toString();d["port"]=80;d["firmware"]=firmwareVersion();d["storageReady"]=ready;d["storageTotal"]=total;d["storageFree"]=total-used;d["claimed"]=managementKey.length()>0;d["setupMode"]=WiFi.getMode()==WIFI_AP;d["usbManaged"]=usbManagedModeActive();}
 void deviceInfo(){JsonDocument d;fillInfo(d);String j;serializeJson(d,j);server.send(200,"application/json",j);}
 void listFiles(){if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.hasArg("dir")?server.arg("dir"):"/");if(!p.length()){server.send(400,"application/json","[]");return;}File root=SD_MMC.open(p);JsonDocument d;JsonArray a=d.to<JsonArray>();if(root&&root.isDirectory()){File f=root.openNextFile();while(f){if(f.name()[0]!='.'){JsonObject i=a.add<JsonObject>();i["type"]=f.isDirectory()?"dir":"file";i["name"]=f.name();i["size"]=f.size();}f.close();f=root.openNextFile();}}String j;serializeJson(d,j);server.send(200,"application/json",j);}
 void diskInfo(){if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\",\"storageReady\":false}");return;}JsonDocument d;d["storageReady"]=true;d["total"]=SD_MMC.totalBytes();d["used"]=SD_MMC.usedBytes();d["free"]=SD_MMC.totalBytes()-SD_MMC.usedBytes();d["cardType"]="SD";d["cardSize"]=SD_MMC.cardSize();String j;serializeJson(d,j);server.send(200,"application/json",j);}
-void deleteFile(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.arg("dir"));if(!p.length()||p=="/"){server.send(400,"text/plain","Invalid path");return;}if(!SD_MMC.exists(p)){server.send(404,"text/plain","Not found");return;}bool ownUsb=!fileBatchActive;if(ownUsb&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not be paused\"}");return;}bool ok=SD_MMC.remove(p);server.send(ok?200:500,"application/json",ok?"{\"status\":\"usb-reconnecting\"}":"{\"error\":\"delete failed\"}");if(ownUsb)finishUsbFileUpdate();}
-void upload(){if(!authorized())return;HTTPUpload&r=server.upload();if(r.status==UPLOAD_FILE_START){uploadOk=false;uploadBytes=0;uploadError="";uploadPath=safePath(uploadName(r.filename));standaloneUsbUpdate=!fileBatchActive;if(standaloneUsbUpdate&&!beginUsbFileUpdate())uploadError="USB storage could not be paused";if(fileBatchActive)fileBatchTouchedAt=millis();if(!storageReady())uploadError="TF card became unavailable";else if(!uploadPath.length())uploadError="invalid destination filename";else if(!uploadError.length()){uploadFile=SD_MMC.open(uploadPath,FILE_WRITE);uploadOk=bool(uploadFile);if(!uploadOk)uploadError="could not create "+uploadPath;}}else if(r.status==UPLOAD_FILE_WRITE){if(fileBatchActive)fileBatchTouchedAt=millis();if(!uploadFile){uploadOk=false;if(!uploadError.length())uploadError="destination file is not open";}else{size_t written=uploadFile.write(r.buf,r.currentSize);uploadBytes+=written;if(written!=r.currentSize){uploadOk=false;uploadError="short write to "+uploadPath+": "+String(written)+" of "+String(r.currentSize)+" bytes";}}}else if(r.status==UPLOAD_FILE_END){if(uploadFile)uploadFile.close();if(uploadBytes!=r.totalSize){uploadOk=false;if(!uploadError.length())uploadError="incomplete upload to "+uploadPath+": "+String(uploadBytes)+" of "+String(r.totalSize)+" bytes";}if(uploadOk){File verify=SD_MMC.open(uploadPath,FILE_READ);if(!verify||verify.size()!=uploadBytes){uploadOk=false;uploadError="written file failed verification: "+uploadPath;}if(verify)verify.close();}}else if(r.status==UPLOAD_FILE_ABORTED){uploadOk=false;uploadError="upload was aborted";if(uploadFile)uploadFile.close();}}
-void finishUpload(){if(!requireAuth()){finishStandaloneUsbUpdate();return;}if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");finishStandaloneUsbUpdate();return;}if(!uploadOk){JsonDocument d;d["error"]=uploadError.length()?uploadError:"file could not be written";String j;serializeJson(d,j);server.send(500,"application/json",j);finishStandaloneUsbUpdate();return;}server.send(200,"application/json",fileBatchActive?"{\"status\":\"uploaded\"}":"{\"status\":\"usb-reconnecting\"}");finishStandaloneUsbUpdate();}
+void deleteFile(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.arg("dir"));if(!p.length()||p=="/"){server.send(400,"text/plain","Invalid path");return;}if(!SD_MMC.exists(p)){server.send(404,"text/plain","Not found");return;}bool ownUsb=!fileBatchActive;if(ownUsb&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not enter managed mode\"}");return;}bool ok=SD_MMC.remove(p);server.send(ok?200:500,"application/json",ok?"{\"status\":\"usb-refreshing\"}":"{\"error\":\"delete failed\"}");if(ownUsb)finishUsbFileUpdate();}
+bool restoreUploadBackup(){
+  if(!uploadBackupPath.length()||!SD_MMC.exists(uploadBackupPath))return true;
+  if(SD_MMC.exists(uploadPath))return SD_MMC.remove(uploadBackupPath);
+  return SD_MMC.rename(uploadBackupPath,uploadPath);
+}
+bool commitUploadedFile(){
+  if(SD_MMC.exists(uploadBackupPath)&&!SD_MMC.remove(uploadBackupPath)){uploadError="could not clear stale backup";return false;}
+  const bool hadOld=SD_MMC.exists(uploadPath);
+  if(hadOld&&!SD_MMC.rename(uploadPath,uploadBackupPath)){uploadError="could not preserve existing "+uploadPath;return false;}
+  if(!SD_MMC.rename(uploadTempPath,uploadPath)){
+    if(hadOld)SD_MMC.rename(uploadBackupPath,uploadPath);
+    uploadError="could not commit "+uploadPath;
+    return false;
+  }
+  File verify=SD_MMC.open(uploadPath,FILE_READ);
+  const bool valid=verify&&verify.size()==uploadBytes;
+  if(verify)verify.close();
+  if(!valid){
+    SD_MMC.remove(uploadPath);
+    if(hadOld)SD_MMC.rename(uploadBackupPath,uploadPath);
+    uploadError="committed file failed verification: "+uploadPath;
+    return false;
+  }
+  if(hadOld)SD_MMC.remove(uploadBackupPath);
+  return true;
+}
+void cleanupUploadArtifacts(){
+  if(uploadFile)uploadFile.close();
+  if(uploadTempPath.length()&&SD_MMC.exists(uploadTempPath))SD_MMC.remove(uploadTempPath);
+  restoreUploadBackup();
+}
+void upload(){
+  if(!authorized())return;
+  HTTPUpload&r=server.upload();
+  if(r.status==UPLOAD_FILE_START){
+    uploadOk=false;uploadBytes=0;uploadError="";uploadPath=safePath(uploadName(r.filename));
+    int slash=uploadPath.lastIndexOf('/');String dir=slash>=0?uploadPath.substring(0,slash+1):String("/");String base=slash>=0?uploadPath.substring(slash+1):uploadPath;
+    uploadTempPath=dir+"."+base+".flyingthumb-new";uploadBackupPath=dir+"."+base+".flyingthumb-old";
+    standaloneUsbUpdate=!fileBatchActive;
+    if(standaloneUsbUpdate&&!beginUsbFileUpdate())uploadError="USB storage could not enter managed mode";
+    if(fileBatchActive)fileBatchTouchedAt=millis();
+    if(!storageReady())uploadError="TF card became unavailable";
+    else if(!uploadPath.length()||uploadPath=="/")uploadError="invalid destination filename";
+    else if(!uploadError.length()){
+      restoreUploadBackup();
+      if(SD_MMC.exists(uploadTempPath))SD_MMC.remove(uploadTempPath);
+      uploadFile=SD_MMC.open(uploadTempPath,FILE_WRITE);
+      uploadOk=bool(uploadFile);
+      if(!uploadOk)uploadError="could not create temporary file for "+uploadPath;
+    }
+  }else if(r.status==UPLOAD_FILE_WRITE){
+    if(fileBatchActive)fileBatchTouchedAt=millis();
+    if(!uploadFile){uploadOk=false;if(!uploadError.length())uploadError="temporary file is not open";}
+    else{
+      size_t written=uploadFile.write(r.buf,r.currentSize);uploadBytes+=written;
+      if(written!=r.currentSize){uploadOk=false;uploadError="short write to "+uploadPath+": "+String(written)+" of "+String(r.currentSize)+" bytes";}
+    }
+  }else if(r.status==UPLOAD_FILE_END){
+    if(uploadFile)uploadFile.close();
+    if(uploadBytes!=r.totalSize){uploadOk=false;if(!uploadError.length())uploadError="incomplete upload to "+uploadPath+": "+String(uploadBytes)+" of "+String(r.totalSize)+" bytes";}
+    if(uploadOk){
+      File verify=SD_MMC.open(uploadTempPath,FILE_READ);
+      if(!verify||verify.size()!=uploadBytes){uploadOk=false;uploadError="temporary file failed verification: "+uploadPath;}
+      if(verify)verify.close();
+    }
+    if(uploadOk)uploadOk=commitUploadedFile();
+    if(!uploadOk)cleanupUploadArtifacts();
+  }else if(r.status==UPLOAD_FILE_ABORTED){
+    uploadOk=false;uploadError="upload was aborted";cleanupUploadArtifacts();
+  }
+}
+void finishUpload(){if(!requireAuth()){finishStandaloneUsbUpdate();return;}if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");finishStandaloneUsbUpdate();return;}if(!uploadOk){JsonDocument d;d["error"]=uploadError.length()?uploadError:"file could not be written";String j;serializeJson(d,j);server.send(500,"application/json",j);finishStandaloneUsbUpdate();return;}server.send(200,"application/json",fileBatchActive?"{\"status\":\"uploaded\"}":"{\"status\":\"usb-refreshing\"}");finishStandaloneUsbUpdate();}
 void firmwareUpload(){if(!authorized())return;HTTPUpload&r=server.upload();if(r.status==UPLOAD_FILE_START){firmwareUploadOk=Update.begin(UPDATE_SIZE_UNKNOWN);}else if(r.status==UPLOAD_FILE_WRITE){if(firmwareUploadOk&&Update.write(r.buf,r.currentSize)!=r.currentSize)firmwareUploadOk=false;}else if(r.status==UPLOAD_FILE_END){firmwareUploadOk=firmwareUploadOk&&Update.end(true);}else if(r.status==UPLOAD_FILE_ABORTED){Update.abort();firmwareUploadOk=false;}}
 void finishFirmwareUpload(){if(!requireAuth())return;if(!firmwareUploadOk){server.send(500,"application/json","{\"error\":\"firmware validation or write failed\"}");return;}rememberOtaRequirements(storageReady());server.send(200,"application/json","{\"status\":\"upgrading\"}");scheduleRestart();}
 void restartDevice(){if(!requireAuth())return;server.send(200,"application/json","{\"status\":\"restarting\"}");scheduleRestart();}

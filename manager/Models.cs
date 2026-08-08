@@ -11,6 +11,7 @@ public sealed class Device
     [JsonPropertyName("storageFree")] public long StorageFree { get; set; }
     [JsonPropertyName("storageReady")] public bool StorageReady { get; set; }
     [JsonPropertyName("claimed")] public bool Claimed { get; set; }
+    [JsonPropertyName("usbManaged")] public bool UsbManaged { get; set; }
     [JsonIgnore] public bool Selected { get; set; } = true;
     [JsonIgnore] public string Status { get; set; } = "Ready";
     [JsonIgnore] public bool IsSimulated { get; set; }

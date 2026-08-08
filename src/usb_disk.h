@@ -3,3 +3,4 @@
 bool beginUsbFileUpdate();
 void finishUsbFileUpdate();
 bool usbFileUpdateActive();
+bool usbManagedModeActive();
