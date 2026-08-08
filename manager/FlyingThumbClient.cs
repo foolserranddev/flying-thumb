@@ -44,16 +44,30 @@ public sealed class FlyingThumbClient
         using var response=await http.SendAsync(Request(d,HttpMethod.Get,"api/list?dir=/",key));await EnsureSuccessAsync(response,"Read file list");return await response.Content.ReadFromJsonAsync<List<RemoteFile>>()??[];
     }
 
-    public async Task DownloadAsync(Device d,string remoteName,string destinationPath)
+    public async Task DownloadAsync(Device d,string remoteName,string destinationPath,Action<long>? progress=null)
     {
-        if(d.IsSimulated){File.Copy(DemoPath(d,remoteName),destinationPath,true);return;}
-        var path=Uri.EscapeDataString(Path.GetFileName(remoteName));using var response=await http.GetAsync(new Uri(d.BaseUri,path),HttpCompletionOption.ResponseHeadersRead);await EnsureSuccessAsync(response,$"Download {Path.GetFileName(remoteName)}");await using var input=await response.Content.ReadAsStreamAsync();await using var output=File.Create(destinationPath);await input.CopyToAsync(output);
+        if(d.IsSimulated){File.Copy(DemoPath(d,remoteName),destinationPath,true);progress?.Invoke(new FileInfo(destinationPath).Length);return;}
+        var path=Uri.EscapeDataString(Path.GetFileName(remoteName));using var response=await http.GetAsync(new Uri(d.BaseUri,path),HttpCompletionOption.ResponseHeadersRead);await EnsureSuccessAsync(response,$"Download {Path.GetFileName(remoteName)}");await using var input=await response.Content.ReadAsStreamAsync();await using var output=File.Create(destinationPath);
+        var buffer=new byte[81920];long copied=0;int read;while((read=await input.ReadAsync(buffer))>0){await output.WriteAsync(buffer.AsMemory(0,read));copied+=read;progress?.Invoke(copied);}
     }
 
-    public async Task UploadAsync(Device d,string filePath,string key)
+    public async Task UploadAsync(Device d,string filePath,string key,Action<long>? progress=null)
     {
-        if(d.IsSimulated){File.Copy(filePath,DemoPath(d,filePath),true);return;}
-        await using var stream=File.OpenRead(filePath);using var content=new MultipartFormDataContent();using var file=new StreamContent(stream);AddFilePart(content,file,"file",filePath);using var response=await http.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0",key,content));await EnsureSuccessAsync(response,$"Upload {Path.GetFileName(filePath)}");
+        if(d.IsSimulated){File.Copy(filePath,DemoPath(d,filePath),true);progress?.Invoke(new FileInfo(filePath).Length);return;}
+        await using var stream=File.OpenRead(filePath);await using var progressStream=new ProgressReadStream(stream,progress);using var content=new MultipartFormDataContent();using var file=new StreamContent(progressStream);AddFilePart(content,file,"file",filePath);using var response=await http.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0",key,content));await EnsureSuccessAsync(response,$"Upload {Path.GetFileName(filePath)}");
+    }
+
+    sealed class ProgressReadStream(Stream inner,Action<long>? progress):Stream
+    {
+        long transferred;
+        void Report(int count){if(count<=0)return;transferred+=count;progress?.Invoke(transferred);}
+        public override bool CanRead=>inner.CanRead;public override bool CanSeek=>inner.CanSeek;public override bool CanWrite=>false;public override long Length=>inner.Length;
+        public override long Position{get=>inner.Position;set=>inner.Position=value;}
+        public override void Flush()=>inner.Flush();public override Task FlushAsync(CancellationToken token)=>inner.FlushAsync(token);
+        public override int Read(byte[] buffer,int offset,int count){var read=inner.Read(buffer,offset,count);Report(read);return read;}
+        public override async Task<int> ReadAsync(byte[] buffer,int offset,int count,CancellationToken token){var read=await inner.ReadAsync(buffer.AsMemory(offset,count),token);Report(read);return read;}
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer,CancellationToken token=default){var read=await inner.ReadAsync(buffer,token);Report(read);return read;}
+        public override long Seek(long offset,SeekOrigin origin)=>inner.Seek(offset,origin);public override void SetLength(long value)=>throw new NotSupportedException();public override void Write(byte[] buffer,int offset,int count)=>throw new NotSupportedException();
     }
 
     public async Task DeleteAsync(Device d,string remoteName,string key)

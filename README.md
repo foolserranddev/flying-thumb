@@ -37,6 +37,8 @@ A short button press starts WPS. Holding the button for five seconds erases the 
 
 The manager is organized around everyday file work. Select devices, then drag files anywhere onto the window or choose **Add Files to Selected**. This distributes files immediately without requiring the drives to be synchronized.
 
+While files are being added or synchronized, the bottom status bar shows live byte progress, the current filename and destination, and the completed transfer count. Large single-file transfers therefore continue to show movement instead of only displaying a busy cursor.
+
 The **Files across all drives** view shows the additive union of filenames and creates one status/size column per discovered drive. Missing files show `—`; present files show their size. Same-name files with different sizes are marked as conflicts.
 
 Choose **Sync...** to keep unique files additive across the included drives. For each differing same-name file, choose which drive's copy should win; check **Apply option to all files** to reuse that drive for the remaining conflicts. Right-click a row and choose **Sync this file...** to resolve or distribute only that filename. Synchronization never deletes files. Select one or more rows and press **Delete**, or right-click and choose **Delete**, to remove every listed copy from the included drives after confirmation.

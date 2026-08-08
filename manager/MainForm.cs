@@ -15,6 +15,8 @@ public sealed class MainForm : Form
 
     readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
     readonly ToolStripStatusLabel summary = new("Ready");
+    readonly ToolStripStatusLabel transferDetail = new() { Visible = false, AutoSize = false, Width = 420, TextAlign = ContentAlignment.MiddleRight };
+    readonly ToolStripProgressBar transferProgress = new() { Minimum = 0, Maximum = 1000, Value = 0, Width = 190, Visible = false };
     readonly Button addButton = new() { Text = "Add files", AutoSize = true };
     readonly Button syncButton = new() { Text = "Sync...", AutoSize = true };
     readonly Button refreshFilesButton = new() { Text = "Refresh", AutoSize = true };
@@ -30,6 +32,12 @@ public sealed class MainForm : Form
     bool setupPageOpened;
     UpdateManifest? availableUpdate;
     string managementKey = ManagerSettings.LoadKey();
+    readonly object transferProgressGate = new();
+    readonly Dictionary<string, long> activeTransferBytes = new();
+    long transferCompletedBytes;
+    long transferTotalBytes;
+    int transferCompletedOperations;
+    int transferTotalOperations;
 
     public MainForm()
     {
@@ -114,7 +122,8 @@ public sealed class MainForm : Form
         split.Dock = DockStyle.Fill; split.Orientation = Orientation.Horizontal; split.SplitterWidth = 6;
         split.Panel1.Padding = new Padding(10, 0, 10, 5); split.Panel1.Controls.Add(deviceGrid);
         split.Panel2.Padding = new Padding(10, 5, 10, 5); split.Panel2.Controls.Add(tabs);
-        var status = new StatusStrip { BackColor = Color.FromArgb(245, 245, 245), SizingGrip = true }; status.Items.Add(summary);
+        summary.Spring = true; summary.TextAlign = ContentAlignment.MiddleLeft;
+        var status = new StatusStrip { BackColor = Color.FromArgb(245, 245, 245), SizingGrip = true }; status.Items.AddRange([summary, transferDetail, transferProgress]);
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.Controls.Add(menu, 0, 0); root.Controls.Add(actions, 0, 1); root.Controls.Add(split, 0, 2); root.Controls.Add(status, 0, 3);
@@ -349,6 +358,38 @@ public sealed class MainForm : Form
     void SetStatus(Device device, string status) { if (InvokeRequired) { BeginInvoke(() => SetStatus(device, status)); return; } device.Status = status; deviceGrid.Refresh(); summary.Text = $"{device.Name}: {status}"; }
     static string FormatSize(long value) => value >= 1L << 30 ? $"{value / (double)(1L << 30):0.0} GB" : value >= 1L << 20 ? $"{value / (double)(1L << 20):0.0} MB" : value >= 1L << 10 ? $"{value / 1024d:0.0} KB" : $"{value} B";
 
+    void BeginTransferProgress(long totalBytes, int totalOperations, string text)
+    {
+        lock (transferProgressGate) { activeTransferBytes.Clear(); transferCompletedBytes = 0; transferTotalBytes = Math.Max(1, totalBytes); transferCompletedOperations = 0; transferTotalOperations = Math.Max(1, totalOperations); }
+        transferDetail.Text = text; transferDetail.Visible = transferProgress.Visible = true; transferProgress.Value = 0;
+        UseWaitCursor = deviceGrid.UseWaitCursor = fileGrid.UseWaitCursor = false; Cursor = deviceGrid.Cursor = fileGrid.Cursor = Cursors.Default;
+    }
+
+    void ReportTransferProgress(string operationId, long bytes, string detail)
+    {
+        if (InvokeRequired) { BeginInvoke(() => ReportTransferProgress(operationId, bytes, detail)); return; }
+        long current; lock (transferProgressGate) { activeTransferBytes[operationId] = Math.Max(0, bytes); current = transferCompletedBytes + activeTransferBytes.Values.Sum(); }
+        var percent = Math.Clamp((int)Math.Round(current * 100d / transferTotalBytes), 0, 100);
+        transferProgress.Value = Math.Clamp(percent * 10, transferProgress.Minimum, transferProgress.Maximum);
+        transferDetail.Text = $"{Math.Min(transferCompletedOperations + 1, transferTotalOperations)}/{transferTotalOperations}  {detail}  {percent}%";
+    }
+
+    void CompleteTransferProgress(string operationId, long expectedBytes, string detail)
+    {
+        if (InvokeRequired) { BeginInvoke(() => CompleteTransferProgress(operationId, expectedBytes, detail)); return; }
+        long current; lock (transferProgressGate) { activeTransferBytes.Remove(operationId); transferCompletedBytes += Math.Max(0, expectedBytes); transferCompletedOperations++; current = transferCompletedBytes + activeTransferBytes.Values.Sum(); }
+        var percent = Math.Clamp((int)Math.Round(current * 100d / transferTotalBytes), 0, 100);
+        transferProgress.Value = Math.Clamp(percent * 10, transferProgress.Minimum, transferProgress.Maximum);
+        transferDetail.Text = $"{Math.Min(transferCompletedOperations, transferTotalOperations)}/{transferTotalOperations}  {detail}  {percent}%";
+    }
+
+    void EndTransferProgress()
+    {
+        if (InvokeRequired) { BeginInvoke(EndTransferProgress); return; }
+        transferProgress.Visible = transferDetail.Visible = false; transferProgress.Value = 0;
+        lock (transferProgressGate) activeTransferBytes.Clear();
+    }
+
     void RecordUploadedFile(Device device, string name, long size)
     {
         if (!inventories.TryGetValue(device.Id, out var files)) inventories[device.Id] = files = [];
@@ -566,6 +607,8 @@ public sealed class MainForm : Form
         SetBusy(true);
         tabs.SelectedIndex = 1;
         WriteLog($"Adding {paths.Length} file(s) to {targets.Length} selected drive(s) as one batch...");
+        var fileSizes = paths.ToDictionary(path => path, path => new FileInfo(path).Length, StringComparer.OrdinalIgnoreCase);
+        BeginTransferProgress(fileSizes.Values.Sum() * targets.Length, paths.Length * targets.Length, "Preparing transfer...");
         var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -589,11 +632,13 @@ public sealed class MainForm : Form
             foreach (var path in paths)
             {
                 var name = Path.GetFileName(path);
+                var operationId = $"{device.Id}:{path}";
+                var expectedBytes = fileSizes[path];
                 SetStatus(device, $"Adding {name}...");
                 try
                 {
-                    await client.UploadAsync(device, path, Key);
-                    RecordUploadedFile(device, name, new FileInfo(path).Length);
+                    await client.UploadAsync(device, path, Key, bytes => ReportTransferProgress(operationId, bytes, $"{name} to {device.Name}"));
+                    RecordUploadedFile(device, name, expectedBytes);
                     lock (gate) changed.Add(device.Id);
                     WriteLog($"{device.Name}: added {name}.");
                 }
@@ -603,6 +648,7 @@ public sealed class MainForm : Form
                     SetStatus(device, "File failed; continuing batch...");
                     WriteLog($"{device.Name}: FAILED to add {name} - {ex.Message}");
                 }
+                finally { CompleteTransferProgress(operationId, expectedBytes, $"{name} to {device.Name}"); }
             }
         }));
 
@@ -630,6 +676,7 @@ public sealed class MainForm : Form
             }
         }
 
+        EndTransferProgress();
         SetBusy(false);
         if (legacyChanged.Length > 0)
         {
@@ -719,6 +766,8 @@ public sealed class MainForm : Form
         WriteLog($"Sync plan: {plannedCopies} file copy operation(s), {conflictsResolved} conflict choice(s).");
         if (plannedCopies == 0) { SetBusy(false); summary.Text = "Already synchronized - USB mode unchanged"; WriteLog("No files need copying; USB mode was not changed."); return; }
         SetBusy(false); if (!ConfirmManagedUsb(targets)) return; SetBusy(true);
+        var plannedTransferBytes = plan.Sum(item => item.Sources[0].File.Size * (1L + item.Destinations.Length));
+        BeginTransferProgress(plannedTransferBytes, plan.Count + plannedCopies, "Preparing sync...");
 
         var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -742,13 +791,17 @@ public sealed class MainForm : Form
                 var destinations = item.Destinations.Where(device => !blocked.Contains(device.Id)).ToArray();
                 if (destinations.Length == 0) continue;
                 var local = Path.Combine(temp, item.Name);
-                try { await client.DownloadAsync(source.Device, item.Name, local); }
+                var downloadId = $"download:{source.Device.Id}:{item.Name}";
+                try { await client.DownloadAsync(source.Device, item.Name, local, bytes => ReportTransferProgress(downloadId, bytes, $"Reading {item.Name} from {source.Device.Name}")); }
                 catch (Exception ex) { errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}"); continue; }
+                finally { CompleteTransferProgress(downloadId, source.File.Size, $"Read {item.Name}"); }
                 foreach (var destination in destinations)
                 {
+                    var uploadId = $"upload:{destination.Id}:{item.Name}";
                     SetStatus(destination, $"Syncing {item.Name}...");
-                    try { await client.UploadAsync(destination, local, Key); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
+                    try { await client.UploadAsync(destination, local, Key, bytes => ReportTransferProgress(uploadId, bytes, $"{item.Name} to {destination.Name}")); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
                     catch (Exception ex) { failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {ex.Message}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}"); }
+                    finally { CompleteTransferProgress(uploadId, source.File.Size, $"{item.Name} to {destination.Name}"); }
                 }
             }
 
@@ -760,10 +813,10 @@ public sealed class MainForm : Form
             WriteLog($"Sync finished: {copied} of {plannedCopies} planned copy operation(s), {conflictsResolved} conflict choice(s), {errors.Count} error(s).");
             foreach (var device in devices.Where(device => sessions.Any(session => session.Id == device.Id) && !failed.Contains(device.Id))) SetStatus(device, ReadyStatus(device));
             foreach (var device in devices.Where(device => failed.Contains(device.Id))) SetStatus(device, "Sync incomplete");
-            SetBusy(false); RenderFileMatrix(); summary.Text = errors.Count == 0 ? $"Sync complete - {copied} copies" : $"Sync finished with {errors.Count} error(s)";
+            EndTransferProgress(); SetBusy(false); RenderFileMatrix(); summary.Text = errors.Count == 0 ? $"Sync complete - {copied} copies" : $"Sync finished with {errors.Count} error(s)";
             if (errors.Count > 0) MessageBox.Show(this, "Sync continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb Sync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        finally { try { Directory.Delete(temp, true); } catch { } SetBusy(false); }
+        finally { try { Directory.Delete(temp, true); } catch { } EndTransferProgress(); SetBusy(false); }
     }
     async Task<bool> RunForDevices(Device[] targets, Func<Device, Task<string>> action)
     {
