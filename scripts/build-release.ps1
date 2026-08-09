@@ -44,7 +44,7 @@ try {
         manager = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbManager.exe"; sha256 = (Get-FileHash $managerExe -Algorithm SHA256).Hash }
         firmware = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-wifi-update.bin"; sha256 = (Get-FileHash $wifiImage -Algorithm SHA256).Hash }
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
-        notes = "Disable the unnecessary firmware USB serial console so memory-reserved WPS has a contiguous allocation above its 256 KB requirement; USB storage and ROM recovery remain available."
+        notes = "Move to the maintained ESP32-S3 framework to fix WPS startup, enforce the two-minute WPS window even when the radio emits no completion event, restore the LCD for the final result, and restore USB serial diagnostics."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

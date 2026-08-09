@@ -17,6 +17,7 @@ esp_lcd_panel_io_handle_t panelIo = nullptr;
 uint16_t *frame = nullptr;
 CRGB led;
 bool displayAwake = false;
+bool activityLedInitialized = false;
 uint32_t displayTouchedAt = 0;
 
 constexpr char glyphKeys[] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-:/_?";
@@ -75,7 +76,7 @@ void initDisplay() {
   ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io, &panelIo));
   esp_lcd_panel_dev_config_t config = {};
   config.reset_gpio_num = PIN_TFT_RST;
-  config.color_space = ESP_LCD_COLOR_SPACE_BGR;
+  config.color_space = static_cast<decltype(config.color_space)>(ESP_LCD_COLOR_SPACE_BGR);
   config.bits_per_pixel = 16;
   ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(panelIo, &config, &panel));
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
@@ -88,7 +89,11 @@ void initDisplay() {
   digitalWrite(PIN_TFT_BL, LOW);
   clear(0x07FF); present(); delay(350);
   displayAwake = true; displayTouchedAt = millis();
-  FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1); FastLED.setBrightness(24);
+  if (!activityLedInitialized) {
+    FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1);
+    FastLED.setBrightness(24);
+    activityLedInitialized = true;
+  }
 }
 
 void releaseDisplayMemoryForWps() {
@@ -97,6 +102,10 @@ void releaseDisplayMemoryForWps() {
   spi_bus_free(LCD_HOST);
   if (frame) { heap_caps_free(frame); frame = nullptr; }
   displayAwake = false;
+}
+
+void restoreDisplayAfterWps() {
+  if (!panel || !frame) initDisplay();
 }
 
 void displayMessage(const char *title, const char *line1, const char *line2) {
