@@ -27,15 +27,14 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.4.6";
-constexpr uint32_t WPS_RETRY_DELAY_MS=1500;
+constexpr char FIRMWARE_VERSION_BASE[]="2.4.7";
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
 WebServer server(80); DNSServer dns; WiFiUDP discovery; Preferences prefs; File uploadFile;
 String savedSsid,savedPassword,setupSsid,deviceId,deviceName,managementKey,uploadPath,uploadTempPath,uploadBackupPath,uploadError;
-bool restartPending=false; bool serverStarted=false; bool wpsOnlyBoot=false; bool firmwareUploadOk=false; bool uploadOk=false; bool setupDnsActive=false; bool fileBatchActive=false; bool standaloneUsbUpdate=false; size_t uploadBytes=0; uint32_t restartAt=0,fileBatchTouchedAt=0;
-bool wpsProvisioned=false,wpsRetryPending=false; volatile uint8_t pendingWpsEvent=0,pendingWpsFailReason=0; uint32_t wpsStartedAt=0,wpsRetryAt=0;
+bool restartPending=false; bool serverStarted=false; bool firmwareUploadOk=false; bool uploadOk=false; bool setupDnsActive=false; bool fileBatchActive=false; bool standaloneUsbUpdate=false; size_t uploadBytes=0; uint32_t restartAt=0,fileBatchTouchedAt=0;
+bool wpsProvisioned=false,wpsActive=false; volatile uint8_t pendingWpsEvent=0,pendingWpsFailReason=0; uint32_t wpsStartedAt=0;
 
 String makeDeviceId(){char v[10];snprintf(v,sizeof(v),"FT-%06X",(uint32_t)(ESP.getEfuseMac()&0xffffff));return String(v);}
 String makeHostName(){String h="flyingthumb-"+deviceId.substring(3);h.toLowerCase();return h;}
@@ -59,21 +58,25 @@ void startDiscovery(){String h=makeHostName(),version=firmwareVersion();if(MDNS.
 void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
 void onWifiEvent(WiFiEvent_t e,arduino_event_info_t info){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){enableWifiPowerSave();showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS)pendingWpsEvent=1;else if(e==ARDUINO_EVENT_WPS_ER_FAILED){pendingWpsFailReason=(uint8_t)info.wps_fail_reason;pendingWpsEvent=2;}else if(e==ARDUINO_EVENT_WPS_ER_TIMEOUT)pendingWpsEvent=3;else if(e==ARDUINO_EVENT_WPS_ER_PBC_OVERLAP)pendingWpsEvent=4;}
 void rememberWpsNetwork(){prefs.begin("network",false);prefs.clear();prefs.putBool("wps",true);prefs.end();savedSsid="";savedPassword="";wpsProvisioned=true;}
-bool startWpsAttempt(){esp_wifi_wps_disable();logMemory("WPS attempt");esp_wps_config_t config=WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);esp_err_t enableResult=esp_wifi_wps_enable(&config);esp_err_t startResult=enableResult==ESP_OK?esp_wifi_wps_start(0):enableResult;if(enableResult==ESP_OK&&startResult==ESP_OK){wpsRetryPending=false;displayMessage("WPS PAIRING","Press router","WPS button");Serial.println("WPS pairing attempt started");return true;}Serial.printf("WPS start failed: enable=0x%x (%s), start=0x%x (%s)\n",enableResult,esp_err_to_name(enableResult),startResult,esp_err_to_name(startResult));wpsRetryPending=true;wpsRetryAt=millis()+WPS_RETRY_DELAY_MS;displayMessage("WPS STARTING","Radio retry...","");return false;}
+bool startWpsAttempt(){
+  esp_wifi_wps_disable();logMemory("WPS attempt");
+  esp_wps_config_t config=WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);
+  esp_err_t enableResult=esp_wifi_wps_enable(&config);
+  esp_err_t startResult=enableResult==ESP_OK?esp_wifi_wps_start(0):enableResult;
+  if(enableResult==ESP_OK&&startResult==ESP_OK){wpsActive=true;displayMessage("WPS ACTIVE","Press router","FW 2.4.7");Serial.println("WPS pairing attempt started");return true;}
+  wpsActive=false;Serial.printf("WPS start failed: enable=0x%x (%s), start=0x%x (%s)\n",enableResult,esp_err_to_name(enableResult),startResult,esp_err_to_name(startResult));
+  displayMessage("WPS FAILED","Use setup page","");return false;
+}
 void handleWpsState(){
-  if(wpsOnlyBoot&&!restartPending&&millis()-wpsStartedAt>=WPS_PAIRING_WINDOW_MS){
-    esp_wifi_wps_disable();wpsRetryPending=false;restoreDisplayAfterWps();
-    displayMessage("WPS TIMED OUT","Short press","to retry");Serial.println("WPS pairing window expired");scheduleRestart();return;
-  }
+  if(!wpsActive)return;
+  if(millis()-wpsStartedAt>=WPS_PAIRING_WINDOW_MS){esp_wifi_wps_disable();wpsActive=false;displayMessage("WPS TIMED OUT","Short press","to retry");Serial.println("WPS pairing window expired");return;}
   uint8_t event=pendingWpsEvent;
-  if(event){
-    pendingWpsEvent=0;
-    if(event==1){esp_wifi_wps_disable();wpsRetryPending=false;rememberWpsNetwork();restoreDisplayAfterWps();displayMessage("WPS SUCCESS","Network saved","Restarting...");scheduleRestart();return;}
-    esp_wifi_wps_disable();
-    if(event==4){Serial.println("WPS PBC overlap: more than one router is advertising WPS");wpsRetryPending=true;wpsRetryAt=millis()+5000;}
-    else{Serial.printf("WPS attempt ended: event=%u reason=%u; retrying\n",event,pendingWpsFailReason);wpsRetryPending=true;wpsRetryAt=millis()+WPS_RETRY_DELAY_MS;}
-  }
-  if(wpsRetryPending&&(int32_t)(millis()-wpsRetryAt)>=0)startWpsAttempt();
+  if(!event)return;
+  pendingWpsEvent=0;esp_wifi_wps_disable();wpsActive=false;
+  if(event==1){rememberWpsNetwork();displayMessage("WPS SUCCESS","Connecting...","");delay(10);WiFi.begin();return;}
+  if(event==4){Serial.println("WPS PBC overlap: more than one router is advertising WPS");displayMessage("WPS OVERLAP","Only one router","can use WPS");return;}
+  Serial.printf("WPS attempt ended: event=%u reason=%u\n",event,pendingWpsFailReason);
+  displayMessage(event==3?"WPS TIMED OUT":"WPS FAILED","Short press","to retry");
 }
 void sendIndex(){if(WiFi.getMode()==WIFI_AP){server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);return;}server.send_P(200,"text/html",(const char*)index_html_start,index_html_end-index_html_start);}
 void sendSettings(){server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);}
@@ -168,7 +171,12 @@ void handleDiscovery(){int n=discovery.parsePacket();if(!n)return;char q[64]={};
 }
 
 void clearNetworkSettings(){prefs.begin("network",false);prefs.clear();prefs.end();wpsProvisioned=false;WiFi.disconnect(true,true);}
-void beginWpsPairing(){prefs.begin("network",false);prefs.putBool("pair",true);prefs.end();delay(500);ESP.restart();}
-bool wpsPairingBootActive(){return wpsOnlyBoot;}
-void initNetworkAndServer(){deviceId=makeDeviceId();logMemory("Network startup");prefs.begin("device",true);deviceName=prefs.getString("name",deviceId);managementKey=prefs.getString("key","");prefs.end();prefs.begin("network",true);savedSsid=prefs.getString("ssid","");savedPassword=prefs.getString("password","");wpsProvisioned=prefs.getBool("wps",false);bool pairRequested=prefs.getBool("pair",false);prefs.end();WiFi.onEvent(onWifiEvent);if(pairRequested){prefs.begin("network",false);prefs.remove("pair");prefs.end();wpsOnlyBoot=true;pendingWpsEvent=0;wpsRetryPending=false;wpsStartedAt=millis();String wpsVersion="FW "+firmwareVersion();displayMessage("WPS ACTIVE","Press router",wpsVersion.c_str());delay(50);releaseDisplayMemoryForWps();logMemory("WPS display released");WiFi.mode(WIFI_MODE_NULL);delay(150);WiFi.mode(WIFI_STA);delay(250);esp_wifi_set_ps(WIFI_PS_NONE);startWpsAttempt();return;}if(!savedSsid.length()&&!wpsProvisioned){startSetupAp();startDiscovery();}else{WiFi.mode(WIFI_STA);WiFi.setHostname(makeHostName().c_str());if(wpsProvisioned)WiFi.begin();else WiFi.begin(savedSsid.c_str(),savedPassword.c_str());displayMessage(deviceName.c_str(),"Connecting...","");uint32_t start=millis();while(WiFi.status()!=WL_CONNECTED&&millis()-start<STA_CONNECT_TIMEOUT_MS)delay(100);if(WiFi.status()==WL_CONNECTED)showConnected();else displayMessage("WIFI OFFLINE","Short: WPS","Hold: reset");}startServer();}
-void handleNetworkAndServer(){handleWpsState();if(setupDnsActive)dns.processNextRequest();if(serverStarted)server.handleClient();if(!wpsOnlyBoot)handleDiscovery();if(fileBatchActive&&millis()-fileBatchTouchedAt>120000){fileBatchActive=false;finishUsbFileUpdate();}if(restartPending&&millis()>=restartAt)ESP.restart();}
+void beginWpsPairing(){
+  pendingWpsEvent=0;wpsActive=false;wpsStartedAt=millis();
+  if(setupDnsActive){dns.stop();setupDnsActive=false;}
+  MDNS.end();discovery.stop();
+  WiFi.mode(WIFI_STA);WiFi.disconnect();delay(100);esp_wifi_set_ps(WIFI_PS_NONE);
+  startWpsAttempt();
+}
+void initNetworkAndServer(){deviceId=makeDeviceId();logMemory("Network startup");prefs.begin("device",true);deviceName=prefs.getString("name",deviceId);managementKey=prefs.getString("key","");prefs.end();prefs.begin("network",true);savedSsid=prefs.getString("ssid","");savedPassword=prefs.getString("password","");wpsProvisioned=prefs.getBool("wps",false);prefs.end();WiFi.onEvent(onWifiEvent);if(!savedSsid.length()&&!wpsProvisioned){startSetupAp();startDiscovery();}else{WiFi.mode(WIFI_STA);WiFi.setHostname(makeHostName().c_str());if(wpsProvisioned)WiFi.begin();else WiFi.begin(savedSsid.c_str(),savedPassword.c_str());displayMessage(deviceName.c_str(),"Connecting...","");uint32_t start=millis();while(WiFi.status()!=WL_CONNECTED&&millis()-start<STA_CONNECT_TIMEOUT_MS)delay(100);if(WiFi.status()==WL_CONNECTED)showConnected();else displayMessage("WIFI OFFLINE","Short: WPS","Hold: reset");}startServer();}
+void handleNetworkAndServer(){handleWpsState();if(setupDnsActive)dns.processNextRequest();if(serverStarted)server.handleClient();handleDiscovery();if(fileBatchActive&&millis()-fileBatchTouchedAt>120000){fileBatchActive=false;finishUsbFileUpdate();}if(restartPending&&millis()>=restartAt)ESP.restart();}

@@ -82,7 +82,7 @@ void serviceButton() {
   if (!down && pressedAt) {
     const uint32_t duration = millis() - pressedAt; pressedAt = 0;
     if (!resetHandled && !wakeOnlyPress && duration >= DEBOUNCE_MS && duration < RESET_HOLD_MS) {
-      displayMessage("WPS STARTING", "Releasing memory", "Please wait"); beginWpsPairing();
+      displayMessage("WPS STARTING", "Please wait", ""); beginWpsPairing();
     }
     wakeOnlyPress = false;
   }
@@ -158,7 +158,6 @@ void setup() {
   Serial.begin(115200); pinMode(PIN_BUTTON, INPUT_PULLUP); initDisplay();
   displayMessage("FLYING THUMB", "Starting...", "");
   initNetworkAndServer();
-  if (wpsPairingBootActive()) return;
   delay(50);
   SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3);
   const bool cardReady = SD_MMC.begin("/sdcard", false);

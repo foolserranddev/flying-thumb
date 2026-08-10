@@ -17,7 +17,6 @@ esp_lcd_panel_io_handle_t panelIo = nullptr;
 uint16_t *frame = nullptr;
 CRGB led;
 bool displayAwake = false;
-bool activityLedInitialized = false;
 uint32_t displayTouchedAt = 0;
 
 constexpr char glyphKeys[] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-:/_?";
@@ -89,24 +88,9 @@ void initDisplay() {
   digitalWrite(PIN_TFT_BL, LOW);
   clear(0x07FF); present(); delay(350);
   displayAwake = true; displayTouchedAt = millis();
-  if (!activityLedInitialized) {
-    FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1);
-    FastLED.setBrightness(24);
-    activityLedInitialized = true;
-  }
+  FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1); FastLED.setBrightness(24);
 }
 
-void releaseDisplayMemoryForWps() {
-  if (panel) { esp_lcd_panel_del(panel); panel = nullptr; }
-  if (panelIo) { esp_lcd_panel_io_del(panelIo); panelIo = nullptr; }
-  spi_bus_free(LCD_HOST);
-  if (frame) { heap_caps_free(frame); frame = nullptr; }
-  displayAwake = false;
-}
-
-void restoreDisplayAfterWps() {
-  if (!panel || !frame) initDisplay();
-}
 
 void displayMessage(const char *title, const char *line1, const char *line2) {
   wakeDisplay();
