@@ -493,7 +493,7 @@ public sealed class MainForm : Form
     async Task RefreshDevices()
     {
         if (busy) return; SetBusy(true); summary.Text = "Searching the local network..."; WriteLog("Searching for Flying Thumb drives...");
-        try { var found = await DeviceDiscovery.FindAsync(TimeSpan.FromSeconds(2)); ReplaceDevices(found); summary.Text = $"Found {found.Count} drive{(found.Count == 1 ? "" : "s")}"; WriteLog(summary.Text + "."); }
+        try { var found = await DeviceDiscovery.FindAsync(TimeSpan.FromSeconds(4)); ReplaceDevices(found); summary.Text = $"Found {found.Count} drive{(found.Count == 1 ? "" : "s")}"; WriteLog(summary.Text + "."); }
         catch (Exception ex) { summary.Text = "Discovery failed"; WriteLog("Discovery failed: " + ex.Message); }
         finally { SetBusy(false); }
         await RefreshFileMatrix();

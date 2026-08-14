@@ -27,7 +27,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.4.7";
+constexpr char FIRMWARE_VERSION_BASE[]="2.4.8";
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
@@ -56,27 +56,29 @@ void enableWifiPowerSave(){if(WiFi.getMode()==WIFI_STA||WiFi.getMode()==WIFI_AP_
 void showConnected(){String ip=WiFi.localIP().toString(),status="USB RW / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}
 void startDiscovery(){String h=makeHostName(),version=firmwareVersion();if(MDNS.begin(h.c_str())){MDNS.addService("flyingthumb","tcp",80);MDNS.addServiceTxt("flyingthumb","tcp","id",deviceId.c_str());MDNS.addServiceTxt("flyingthumb","tcp","name",deviceName.c_str());MDNS.addServiceTxt("flyingthumb","tcp","version",version.c_str());}discovery.begin(DISCOVERY_PORT);}
 void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
-void onWifiEvent(WiFiEvent_t e,arduino_event_info_t info){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){enableWifiPowerSave();showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS)pendingWpsEvent=1;else if(e==ARDUINO_EVENT_WPS_ER_FAILED){pendingWpsFailReason=(uint8_t)info.wps_fail_reason;pendingWpsEvent=2;}else if(e==ARDUINO_EVENT_WPS_ER_TIMEOUT)pendingWpsEvent=3;else if(e==ARDUINO_EVENT_WPS_ER_PBC_OVERLAP)pendingWpsEvent=4;}
+void onWifiEvent(WiFiEvent_t e,arduino_event_info_t info){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){enableWifiPowerSave();showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS)pendingWpsEvent=1;else if(e==ARDUINO_EVENT_WPS_ER_FAILED){pendingWpsFailReason=(uint8_t)info.wps_fail_reason;pendingWpsEvent=2;}else if(e==ARDUINO_EVENT_WPS_ER_TIMEOUT)pendingWpsEvent=3;else if(e==ARDUINO_EVENT_WPS_ER_PBC_OVERLAP)pendingWpsEvent=4;else if(e==ARDUINO_EVENT_WPS_ER_PIN)pendingWpsEvent=5;}
 void rememberWpsNetwork(){prefs.begin("network",false);prefs.clear();prefs.putBool("wps",true);prefs.end();savedSsid="";savedPassword="";wpsProvisioned=true;}
 bool startWpsAttempt(){
   esp_wifi_wps_disable();logMemory("WPS attempt");
   esp_wps_config_t config=WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);
   esp_err_t enableResult=esp_wifi_wps_enable(&config);
   esp_err_t startResult=enableResult==ESP_OK?esp_wifi_wps_start(0):enableResult;
-  if(enableResult==ESP_OK&&startResult==ESP_OK){wpsActive=true;displayMessage("WPS ACTIVE","Press router","FW 2.4.7");Serial.println("WPS pairing attempt started");return true;}
+  if(enableResult==ESP_OK&&startResult==ESP_OK){wpsActive=true;displayMessage("WPS ACTIVE","Press router","FW 2.4.8");Serial.println("WPS pairing attempt started");return true;}
   wpsActive=false;Serial.printf("WPS start failed: enable=0x%x (%s), start=0x%x (%s)\n",enableResult,esp_err_to_name(enableResult),startResult,esp_err_to_name(startResult));
   displayMessage("WPS FAILED","Use setup page","");return false;
 }
 void handleWpsState(){
   if(!wpsActive)return;
-  if(millis()-wpsStartedAt>=WPS_PAIRING_WINDOW_MS){esp_wifi_wps_disable();wpsActive=false;displayMessage("WPS TIMED OUT","Short press","to retry");Serial.println("WPS pairing window expired");return;}
+  if(millis()-wpsStartedAt>=WPS_PAIRING_WINDOW_MS){esp_wifi_wps_disable();wpsActive=false;displayMessage("NO PBC SIGNAL","Set Push Button","then retry");Serial.println("WPS pairing window expired without a PBC response");return;}
   uint8_t event=pendingWpsEvent;
   if(!event)return;
   pendingWpsEvent=0;esp_wifi_wps_disable();wpsActive=false;
   if(event==1){rememberWpsNetwork();displayMessage("WPS SUCCESS","Connecting...","");delay(10);WiFi.begin();return;}
   if(event==4){Serial.println("WPS PBC overlap: more than one router is advertising WPS");displayMessage("WPS OVERLAP","Only one router","can use WPS");return;}
+  if(event==5){Serial.println("WPS PIN event received while Push Button mode was requested");displayMessage("WPS PIN MODE","Set router to","Push Button");return;}
   Serial.printf("WPS attempt ended: event=%u reason=%u\n",event,pendingWpsFailReason);
-  displayMessage(event==3?"WPS TIMED OUT":"WPS FAILED","Short press","to retry");
+  if(event==3||pendingWpsFailReason==WPS_FAIL_REASON_RECV_M2D)displayMessage("NO PBC SIGNAL","Set Push Button","then retry");
+  else displayMessage("WPS FAILED","Short press","to retry");
 }
 void sendIndex(){if(WiFi.getMode()==WIFI_AP){server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);return;}server.send_P(200,"text/html",(const char*)index_html_start,index_html_end-index_html_start);}
 void sendSettings(){server.sendHeader("Cache-Control","no-store");server.send_P(200,"text/html",(const char*)settings_html_start,settings_html_end-settings_html_start);}

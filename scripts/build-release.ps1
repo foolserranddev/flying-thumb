@@ -44,7 +44,7 @@ try {
         manager = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbManager.exe"; sha256 = (Get-FileHash $managerExe -Algorithm SHA256).Hash }
         firmware = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-wifi-update.bin"; sha256 = (Get-FileHash $wifiImage -Algorithm SHA256).Hash }
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
-        notes = "Start WPS directly without rebooting or reconnecting USB, remove the pairing-only memory workaround and retry machinery, keep one clear two-minute attempt, and pin project libraries to exact versions."
+        notes = "Improve WPS guidance for router PIN mode or missing Push Button responses, and make Manager discovery send repeated broadcasts during one four-second search instead of requiring repeated clicks."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

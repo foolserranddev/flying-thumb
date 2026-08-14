@@ -24,26 +24,37 @@ sealed class NetworkDeviceDiscoveryProvider : IDeviceDiscoveryProvider
             .Distinct()
             .Select(address => new IPEndPoint(address, Port))
             .ToArray();
-        foreach (var target in targets)
-        {
-            try { await udp.SendAsync(payload, payload.Length, target); }
-            catch (SocketException) { }
-        }
         var found = new Dictionary<string, Device>(StringComparer.OrdinalIgnoreCase);
         using var timeout = new CancellationTokenSource(duration);
-        while (!timeout.IsCancellationRequested)
+        var sender = SendDiscoveryBursts();
+        try
         {
-            try
+            while (!timeout.IsCancellationRequested)
             {
-                var packet = await udp.ReceiveAsync(timeout.Token);
-                var device = JsonSerializer.Deserialize<Device>(packet.Buffer);
-                if (device is { Id.Length: > 0 }) { if (string.IsNullOrWhiteSpace(device.Ip)) device.Ip = packet.RemoteEndPoint.Address.ToString(); found[device.Id] = device; }
+                try
+                {
+                    var packet = await udp.ReceiveAsync(timeout.Token);
+                    var device = JsonSerializer.Deserialize<Device>(packet.Buffer);
+                    if (device is { Id.Length: > 0 }) { if (string.IsNullOrWhiteSpace(device.Ip)) device.Ip = packet.RemoteEndPoint.Address.ToString(); found[device.Id] = device; }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (JsonException) { }
+                catch (SocketException) { }
             }
-            catch (OperationCanceledException) { break; }
-            catch (JsonException) { }
-            catch (SocketException) { }
         }
+        finally { timeout.Cancel(); try { await sender; } catch (OperationCanceledException) { } }
         return found.Values.ToArray();
+
+        async Task SendDiscoveryBursts()
+        {
+            while (!timeout.IsCancellationRequested)
+            {
+                foreach (var target in targets)
+                    try { await udp.SendAsync(payload, payload.Length, target); }
+                    catch (SocketException) { }
+                await Task.Delay(350, timeout.Token);
+            }
+        }
     }
 
     static IEnumerable<IPAddress> BroadcastAddresses()
