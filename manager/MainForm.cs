@@ -153,24 +153,34 @@ public sealed class MainForm : Form
         if (!IsSetupNetworkConnected()) { setupPageOpened = false; return; }
         if (setupPageOpened) return;
         setupPageOpened = true;
-        OpenSetupPage(false);
+        OpenSetupHotspotPage();
     }
 
-    void OpenSetupPage(bool requireConnection)
+    void OpenSetupHotspotPage()
     {
-        if (requireConnection && !IsSetupNetworkConnected())
+        OpenSettingsPage("http://192.168.77.1/", "Flying Thumb Setup");
+    }
+
+    void OpenSelectedDriveSettings()
+    {
+        if (deviceGrid.CurrentRow?.DataBoundItem is not Device drive || drive.IsSimulated)
         {
-            MessageBox.Show(this, "First connect Windows Wi-Fi to the FlyingThumb setup network, then try again.", "Flying Thumb Setup", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "Choose one network-connected Flying Thumb Drive first.", "Drive Settings", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+        OpenSettingsPage(new Uri(drive.BaseUri, "settings.html").ToString(), $"{drive.Name} settings");
+    }
+
+    void OpenSettingsPage(string address, string description)
+    {
         try
         {
-            Process.Start(new ProcessStartInfo("http://192.168.77.1/") { UseShellExecute = true });
-            summary.Text = "Flying Thumb Setup opened in your browser";
+            Process.Start(new ProcessStartInfo(address) { UseShellExecute = true });
+            summary.Text = description + " opened in your browser";
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, "Could not open the setup page. Open http://192.168.77.1 in your browser.\n\n" + ex.Message, "Flying Thumb Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, $"Could not open the settings page. Open {address} in your browser.\n\n" + ex.Message, "Flying Thumb Settings", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
     void EditShopKey(object? sender, EventArgs e)
@@ -240,7 +250,7 @@ public sealed class MainForm : Form
         drives.DropDownItems.Add(Item("Select All Drives", (_, _) => SelectAll(true)));
         drives.DropDownItems.Add(Item("Select No Drives", (_, _) => SelectAll(false)));
         drives.DropDownItems.Add(new ToolStripSeparator());
-        drives.DropDownItems.Add(Item("Open Selected Drive's Setup Page", (_, _) => OpenSetupPage(true)));
+        drives.DropDownItems.Add(Item("Open Selected Drive's Settings Page", (_, _) => OpenSelectedDriveSettings()));
         drives.DropDownItems.Add(Item("Rename Selected Drive...", RenameDevice));
         drives.DropDownItems.Add(Item("Return Selected Drives to Writable USB Mode...", async (_, _) => await ReleaseManagedUsb()));
         drives.DropDownItems.Add(new ToolStripSeparator());
