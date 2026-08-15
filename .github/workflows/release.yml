@@ -1,8 +1,11 @@
 name: Release Flying Thumb
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish"
+        required: true
+        type: string
 permissions:
   contents: write
 jobs:
@@ -10,6 +13,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -28,6 +33,7 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag }}
           generate_release_notes: true
           files: |
             release/FlyingThumbManager.exe
