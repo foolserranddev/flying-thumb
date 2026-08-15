@@ -112,21 +112,35 @@ bool beginUsbFileUpdate() {
     msc.mediaPresent(true);
     delay(250);
     usbManagedMode = true;
-    displayMessage("MANAGED MODE", "USB read-only", "Manager: release");
+    displayMessage("MANAGER ACTIVE", "Updating files", "USB paused");
   }
   usbUpdateActive = true;
   return true;
 }
 
-void finishUsbFileUpdate() {
-  if (!usbDiskReady || !usbUpdateActive) return;
-  // Keep USB electrically connected. A logical media change makes the host
-  // discard cached FAT metadata and reload the completed read-only volume.
+bool finishUsbFileUpdate() {
+  if (!usbDiskReady || !usbUpdateActive) return false;
+  // Flush and remount the filesystem while the USB host cannot access it,
+  // then hand the refreshed volume straight back to the machine as writable.
+  // Some machines (including Bambu printers) reject read-only USB storage.
   msc.mediaPresent(false);
   delay(750);
-  msc.isWritable(false);
+  SD_MMC.end();
+  delay(100);
+  if (!SD_MMC.begin("/sdcard", false)) {
+    usbDiskReady = false;
+    usbUpdateActive = false;
+    displayMessage("TF CARD ERROR", "USB refresh failed", "Replug device");
+    return false;
+  }
+  msc.isWritable(true);
+  usbManagedMode = false;
+  usbWritesBlocked = false;
   msc.mediaPresent(true);
   usbUpdateActive = false;
+  delay(250);
+  displayMessage("USB WRITABLE", "Files refreshed", "WiFi ready");
+  return true;
 }
 
 bool usbFileUpdateActive() { return usbUpdateActive; }

@@ -27,7 +27,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.4.8";
+constexpr char FIRMWARE_VERSION_BASE[]="2.4.9";
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
@@ -50,7 +50,7 @@ void saveDevice(){prefs.begin("device",false);prefs.putString("name",deviceName)
 void scheduleRestart(){restartPending=true;restartAt=millis()+900;}
 void finishStandaloneUsbUpdate(){if(standaloneUsbUpdate){standaloneUsbUpdate=false;finishUsbFileUpdate();}}
 void beginFileBatch(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}if(!fileBatchActive&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not enter managed mode\"}");return;}fileBatchActive=true;fileBatchTouchedAt=millis();server.send(200,"application/json","{\"status\":\"batch-ready\"}");}
-void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;server.send(200,"application/json","{\"status\":\"usb-refreshing\"}");finishUsbFileUpdate();}
+void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;if(!finishUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"TF card could not be handed back to USB\"}");return;}server.send(200,"application/json","{\"status\":\"usb-writable\"}");}
 void releaseManagedUsb(){if(!requireAuth())return;if(fileBatchActive||usbFileUpdateActive()){server.send(409,"application/json","{\"error\":\"file update still active\"}");return;}if(!releaseUsbManagedMode()){server.send(500,"application/json","{\"error\":\"USB storage could not return to writable mode\"}");return;}server.send(200,"application/json","{\"status\":\"usb-writable\"}");}
 void enableWifiPowerSave(){if(WiFi.getMode()==WIFI_STA||WiFi.getMode()==WIFI_AP_STA)esp_wifi_set_ps(WIFI_PS_MAX_MODEM);}
 void showConnected(){String ip=WiFi.localIP().toString(),status="USB RW / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}

@@ -346,7 +346,7 @@ public sealed class MainForm : Form
         if (switching == 0) return true;
         var noun = switching == 1 ? "drive" : "drives";
         return MessageBox.Show(this,
-            $"This will place {switching} {noun} in managed mode. USB becomes read-only while Flying Thumb Manager controls file changes.\n\nClose any files currently being written through USB. Afterward, choose Drives > Return USB to Writable Mode (firmware 2.3 or newer), or unplug and reconnect the Flying Thumb.",
+            $"Flying Thumb Manager will briefly pause USB access on {switching} {noun} while it changes files. Each drive will reconnect to its attached machine as writable automatically when the complete batch finishes.\n\nClose any files currently being written through USB before continuing.",
             "Begin Managed File Session", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) == DialogResult.OK;
     }
     async Task ReleaseManagedUsb()
@@ -365,7 +365,7 @@ public sealed class MainForm : Form
             return;
         }
         var noun = targets.Length == 1 ? "drive" : "drives";
-        if (MessageBox.Show(this, $"Return {targets.Length} included {noun} to normal writable USB mode?\n\nClose any files currently open from the Flying Thumb on the attached machine. Its USB disk will briefly disappear and reconnect as writable. The next Manager file change will place it back into managed read-only mode.", "Return USB to Writable Mode", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+        if (MessageBox.Show(this, $"Return {targets.Length} included {noun} to normal writable USB mode?\n\nClose any files currently open from the Flying Thumb on the attached machine. Its USB disk will briefly disappear and reconnect as writable. Newer firmware normally does this automatically after every completed Manager operation.", "Return USB to Writable Mode", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
 
         var succeeded = await RunForDevices(targets, async device =>
         {
@@ -637,7 +637,7 @@ public sealed class MainForm : Form
         var preview = string.Join("\n", names.Take(8).Select(name => "  " + name));
         if (names.Length > 8) preview += $"\n  ...and {names.Length - 8} more";
         var switching = targets.Count(device => !device.IsSimulated && !device.UsbManaged);
-        var modeNote = switching > 0 ? $"\n\n{switching} drive{(switching == 1 ? "" : "s")} will enter managed mode; the attached machine's USB access becomes read-only until released from the Drives menu or replugged. Flying Thumb Manager retains write access." : "";
+        var modeNote = switching > 0 ? $"\n\nUSB access on {switching} drive{(switching == 1 ? "" : "s")} will pause during deletion, then reconnect as writable automatically." : "";
         if (MessageBox.Show(this, $"Permanently delete {names.Length} selected file{(names.Length == 1 ? "" : "s")} ({copies} total {copyWord}) from the included drives?\n\n{preview}{modeNote}\n\nThis cannot be undone.", "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
 
         SetBusy(true);
@@ -667,7 +667,7 @@ public sealed class MainForm : Form
         var sessions = targets.Where(device => !blocked.Contains(device.Id) && batchMode.GetValueOrDefault(device.Id)).ToArray();
         foreach (var device in sessions)
         {
-            try { await client.CommitFileBatchAsync(device, Key); }
+            try { await client.CommitFileBatchAsync(device, Key); device.UsbManaged = false; }
             catch (Exception ex) { failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}"); WriteLog($"{device.Name}: USB refresh failed - {ex.Message}"); }
         }
         foreach (var device in devices.Where(device => sessions.Any(session => session.Id == device.Id) && !failed.Contains(device.Id))) SetStatus(device, ReadyStatus(device));
@@ -745,7 +745,7 @@ public sealed class MainForm : Form
         foreach (var device in modernSessions.Where(d => !d.IsSimulated)) SetStatus(device, "Refreshing USB drive...");
         foreach (var device in modernSessions)
         {
-            try { await client.CommitFileBatchAsync(device, Key); }
+            try { await client.CommitFileBatchAsync(device, Key); device.UsbManaged = false; }
             catch (Exception ex)
             {
                 failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}");
@@ -898,7 +898,7 @@ public sealed class MainForm : Form
             var sessions = targets.Where(device => !blocked.Contains(device.Id) && batchMode.GetValueOrDefault(device.Id)).ToArray();
             foreach (var device in sessions.Where(device => !device.IsSimulated)) SetStatus(device, "Refreshing USB drive...");
             foreach (var device in sessions)
-                try { await client.CommitFileBatchAsync(device, Key); } catch (Exception ex) { failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}"); WriteLog($"{device.Name}: USB refresh failed - {ex.Message}"); }
+                try { await client.CommitFileBatchAsync(device, Key); device.UsbManaged = false; } catch (Exception ex) { failed.Add(device.Id); errors.Add($"{device.Name} / USB refresh: {ex.Message}"); WriteLog($"{device.Name}: USB refresh failed - {ex.Message}"); }
 
             WriteLog($"Sync finished: {copied} of {plannedCopies} planned copy operation(s), {conflictsResolved} conflict choice(s), {errors.Count} error(s).");
             foreach (var device in devices.Where(device => sessions.Any(session => session.Id == device.Id) && !failed.Contains(device.Id))) SetStatus(device, ReadyStatus(device));

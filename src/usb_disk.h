@@ -1,7 +1,7 @@
 #pragma once
 
 bool beginUsbFileUpdate();
-void finishUsbFileUpdate();
+bool finishUsbFileUpdate();
 bool usbFileUpdateActive();
 bool usbManagedModeActive();
 bool releaseUsbManagedMode();

@@ -84,7 +84,7 @@ Mutating HTTP requests use the `X-FlyingThumb-Key` header. Credentials and manag
 
 ## Storage safety
 
-Every physical plug-in starts as a normal writable USB thumb drive. Discovery and file viewing do not change that state. Before the first Manager/web file mutation, firmware 2.2.0 or newer blocks USB writes, logically refreshes the medium as read-only, remounts FatFs to discard stale metadata, and grants the network side exclusive write control. With firmware 2.3.0 or newer, choose **Drives > Return USB to Writable Mode...** to safely remount and reconnect the disk as writable without physically unplugging it. A later Manager mutation repeats the managed-mode handoff.
+Every physical plug-in starts as a normal writable USB thumb drive. Discovery and file viewing do not change that state. During a Manager/web file mutation, firmware 2.4.9 or newer briefly pauses USB access and grants the network side exclusive write control. When the complete batch finishes, it flushes and remounts the card, then reconnects it to the attached machine as writable automatically. **Drives > Return USB to Writable Mode...** remains available as a recovery action for older firmware or an interrupted operation.
 
 Uploads are transactional: data is written to a hidden temporary file, verified, swapped into place while preserving the previous file as a rollback copy, and verified again. After a completed batch, the firmware reports a logical media change so the attached host reloads the directory; the ESP32 and USB controller remain connected. Manager 1.0.3 or newer refuses file changes on older firmware because the former surprise-disconnect method could damage FAT metadata.
 
