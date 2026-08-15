@@ -26,8 +26,9 @@ try {
         "release/latest.json"
     )
 
-    gh release view $Tag --json tagName *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $publishedReleases = $(gh release list --limit 100 --json tagName) | ConvertFrom-Json
+    $publishedTags = @($publishedReleases | ForEach-Object { $_.tagName })
+    if ($publishedTags -contains $Tag) {
         gh release upload $Tag @assets --clobber
         if ($LASTEXITCODE -ne 0) { throw "Could not upload release files." }
         gh release edit $Tag --latest
