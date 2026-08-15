@@ -27,7 +27,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.4.11";
+constexpr char FIRMWARE_VERSION_BASE[]="2.4.12";
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
@@ -52,11 +52,11 @@ void finishStandaloneUsbUpdate(){if(standaloneUsbUpdate){standaloneUsbUpdate=fal
 void beginFileBatch(){if(!requireAuth())return;if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}if(!fileBatchActive&&!beginUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"USB storage could not enter managed mode\"}");return;}fileBatchActive=true;fileBatchTouchedAt=millis();server.send(200,"application/json","{\"status\":\"batch-ready\"}");}
 void commitFileBatch(){if(!requireAuth())return;fileBatchActive=false;if(!finishUsbFileUpdate()){server.send(500,"application/json","{\"error\":\"TF card could not be handed back to USB\"}");return;}server.send(200,"application/json","{\"status\":\"usb-writable\"}");}
 void releaseManagedUsb(){if(!requireAuth())return;if(fileBatchActive||usbFileUpdateActive()){server.send(409,"application/json","{\"error\":\"file update still active\"}");return;}if(!releaseUsbManagedMode()){server.send(500,"application/json","{\"error\":\"USB storage could not return to writable mode\"}");return;}server.send(200,"application/json","{\"status\":\"usb-writable\"}");}
-void enableWifiPowerSave(){if(WiFi.getMode()==WIFI_STA||WiFi.getMode()==WIFI_AP_STA)esp_wifi_set_ps(WIFI_PS_MAX_MODEM);}
+void enableWifiRangeMode(){esp_wifi_set_ps(WIFI_PS_NONE);esp_wifi_set_max_tx_power(80);}
 void showConnected(){String ip=WiFi.localIP().toString(),status="USB RW / "+firmwareVersion();displayMessage(deviceName.c_str(),ip.c_str(),status.c_str());}
 void startDiscovery(){String h=makeHostName(),version=firmwareVersion();if(MDNS.begin(h.c_str())){MDNS.addService("flyingthumb","tcp",80);MDNS.addServiceTxt("flyingthumb","tcp","id",deviceId.c_str());MDNS.addServiceTxt("flyingthumb","tcp","name",deviceName.c_str());MDNS.addServiceTxt("flyingthumb","tcp","version",version.c_str());}discovery.begin(DISCOVERY_PORT);}
-void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
-void onWifiEvent(WiFiEvent_t e,arduino_event_info_t info){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){enableWifiPowerSave();showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS)pendingWpsEvent=1;else if(e==ARDUINO_EVENT_WPS_ER_FAILED){pendingWpsFailReason=(uint8_t)info.wps_fail_reason;pendingWpsEvent=2;}else if(e==ARDUINO_EVENT_WPS_ER_TIMEOUT)pendingWpsEvent=3;else if(e==ARDUINO_EVENT_WPS_ER_PBC_OVERLAP)pendingWpsEvent=4;else if(e==ARDUINO_EVENT_WPS_ER_PIN)pendingWpsEvent=5;}
+void startSetupAp(){setupSsid="FlyingThumb-"+deviceId.substring(3);WiFi.mode(WIFI_AP);enableWifiRangeMode();WiFi.softAPConfig(SETUP_IP,SETUP_IP,SETUP_MASK);WiFi.softAP(setupSsid.c_str(),SETUP_PASSWORD);setupDnsActive=dns.start(DNS_PORT,"*",SETUP_IP);displayMessage("SETUP MODE",setupSsid.c_str(),"192.168.77.1");}
+void onWifiEvent(WiFiEvent_t e,arduino_event_info_t info){if(e==ARDUINO_EVENT_WIFI_STA_GOT_IP){enableWifiRangeMode();showConnected();startDiscovery();}else if(e==ARDUINO_EVENT_WPS_ER_SUCCESS)pendingWpsEvent=1;else if(e==ARDUINO_EVENT_WPS_ER_FAILED){pendingWpsFailReason=(uint8_t)info.wps_fail_reason;pendingWpsEvent=2;}else if(e==ARDUINO_EVENT_WPS_ER_TIMEOUT)pendingWpsEvent=3;else if(e==ARDUINO_EVENT_WPS_ER_PBC_OVERLAP)pendingWpsEvent=4;else if(e==ARDUINO_EVENT_WPS_ER_PIN)pendingWpsEvent=5;}
 void rememberWpsNetwork(){prefs.begin("network",false);prefs.clear();prefs.putBool("wps",true);prefs.end();savedSsid="";savedPassword="";wpsProvisioned=true;}
 bool startWpsAttempt(){
   esp_wifi_wps_disable();logMemory("WPS attempt");
@@ -177,8 +177,8 @@ void beginWpsPairing(){
   pendingWpsEvent=0;wpsActive=false;wpsStartedAt=millis();
   if(setupDnsActive){dns.stop();setupDnsActive=false;}
   MDNS.end();discovery.stop();
-  WiFi.mode(WIFI_STA);WiFi.disconnect();delay(100);esp_wifi_set_ps(WIFI_PS_NONE);
+  WiFi.mode(WIFI_STA);enableWifiRangeMode();WiFi.disconnect();delay(100);
   startWpsAttempt();
 }
-void initNetworkAndServer(){deviceId=makeDeviceId();logMemory("Network startup");prefs.begin("device",true);deviceName=prefs.getString("name",deviceId);managementKey=prefs.getString("key","");prefs.end();prefs.begin("network",true);savedSsid=prefs.getString("ssid","");savedPassword=prefs.getString("password","");wpsProvisioned=prefs.getBool("wps",false);prefs.end();WiFi.onEvent(onWifiEvent);if(!savedSsid.length()&&!wpsProvisioned){startSetupAp();startDiscovery();}else{WiFi.mode(WIFI_STA);WiFi.setHostname(makeHostName().c_str());if(wpsProvisioned)WiFi.begin();else WiFi.begin(savedSsid.c_str(),savedPassword.c_str());displayMessage(deviceName.c_str(),"Connecting...","");uint32_t start=millis();while(WiFi.status()!=WL_CONNECTED&&millis()-start<STA_CONNECT_TIMEOUT_MS)delay(100);if(WiFi.status()==WL_CONNECTED)showConnected();else displayMessage("WIFI OFFLINE","Short: WPS","Hold: reset");}startServer();}
+void initNetworkAndServer(){deviceId=makeDeviceId();logMemory("Network startup");prefs.begin("device",true);deviceName=prefs.getString("name",deviceId);managementKey=prefs.getString("key","");prefs.end();prefs.begin("network",true);savedSsid=prefs.getString("ssid","");savedPassword=prefs.getString("password","");wpsProvisioned=prefs.getBool("wps",false);prefs.end();WiFi.onEvent(onWifiEvent);if(!savedSsid.length()&&!wpsProvisioned){startSetupAp();startDiscovery();}else{WiFi.mode(WIFI_STA);enableWifiRangeMode();WiFi.setHostname(makeHostName().c_str());if(wpsProvisioned)WiFi.begin();else WiFi.begin(savedSsid.c_str(),savedPassword.c_str());displayMessage(deviceName.c_str(),"Connecting...","");uint32_t start=millis();while(WiFi.status()!=WL_CONNECTED&&millis()-start<STA_CONNECT_TIMEOUT_MS)delay(100);if(WiFi.status()==WL_CONNECTED)showConnected();else displayMessage("WIFI OFFLINE","Short: WPS","Hold: reset");}startServer();}
 void handleNetworkAndServer(){handleWpsState();if(setupDnsActive)dns.processNextRequest();if(serverStarted)server.handleClient();handleDiscovery();if(fileBatchActive&&millis()-fileBatchTouchedAt>120000){fileBatchActive=false;finishUsbFileUpdate();}if(restartPending&&millis()>=restartAt)ESP.restart();}
