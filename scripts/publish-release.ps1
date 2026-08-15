@@ -7,8 +7,8 @@ try {
     & "$PSScriptRoot\build-release.ps1"
     if ($LASTEXITCODE -ne 0) { throw "Release build failed." }
 
-    git rev-parse --verify "refs/tags/$Tag" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $existingTag = git tag --list $Tag
+    if ([string]::IsNullOrWhiteSpace($existingTag)) {
         git tag $Tag
         if ($LASTEXITCODE -ne 0) { throw "Could not create tag $Tag." }
     }
