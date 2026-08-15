@@ -1,11 +1,17 @@
-param([Parameter(Mandatory = $true)][string]$Tag)
+param(
+    [Parameter(Mandatory = $true)][string]$Tag,
+    [string]$Repository = "foolserranddev/flying-thumb",
+    [switch]$SkipBuild
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
 Push-Location $root
 try {
-    & "$PSScriptRoot\build-release.ps1"
-    if ($LASTEXITCODE -ne 0) { throw "Release build failed." }
+    if (!$SkipBuild) {
+        & "$PSScriptRoot\build-release.ps1"
+        if ($LASTEXITCODE -ne 0) { throw "Release build failed." }
+    }
 
     $existingTag = git tag --list $Tag
     if ([string]::IsNullOrWhiteSpace($existingTag)) {
@@ -26,15 +32,15 @@ try {
         "release/latest.json"
     )
 
-    $publishedReleases = $(gh release list --limit 100 --json tagName) | ConvertFrom-Json
+    $publishedReleases = $(gh release list --repo $Repository --limit 100 --json tagName) | ConvertFrom-Json
     $publishedTags = @($publishedReleases | ForEach-Object { $_.tagName })
     if ($publishedTags -contains $Tag) {
-        gh release upload $Tag @assets --clobber
+        gh release upload $Tag @assets --clobber --repo $Repository
         if ($LASTEXITCODE -ne 0) { throw "Could not upload release files." }
-        gh release edit $Tag --latest
+        gh release edit $Tag --latest --repo $Repository
     }
     else {
-        gh release create $Tag @assets --title $Tag --generate-notes --latest
+        gh release create $Tag @assets --title $Tag --generate-notes --latest --repo $Repository
     }
     if ($LASTEXITCODE -ne 0) { throw "Could not publish release $Tag." }
 
