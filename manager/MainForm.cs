@@ -227,26 +227,42 @@ public sealed class MainForm : Form
     {
         var menu = new MenuStrip { BackColor = Color.White, RenderMode = ToolStripRenderMode.System, Padding = new Padding(8, 3, 0, 3) };
         var file = new ToolStripMenuItem("File");
-
-        file.DropDownItems.Add(Item("Refresh File View", async (_, _) => await RefreshFileMatrix()));
-        file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add(Item("Install / Recover via USB...", RecoverUsb));
-        file.DropDownItems.Add(Item("Check for Updates...", async (_, _) => await CheckForUpdates(true)));
+        file.DropDownItems.Add(Item("Add Files...", async (_, _) => await ChooseAndAddFiles(), Keys.Control | Keys.O));
+        file.DropDownItems.Add(Item("Sync Selected Files", async (_, _) => await ChooseAndSync(), Keys.Control | Keys.Shift | Keys.S));
+        file.DropDownItems.Add(Item("Delete Selected Files...", async (_, _) => await DeleteSelectedFiles()));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Item("Exit", (_, _) => Close()));
-        var device = new ToolStripMenuItem("Drives");
-        device.DropDownItems.Add(Item("Find Drives", async (_, _) => await RefreshDevices(), Keys.F5));
-        device.DropDownItems.Add(Item("Open Setup Page", (_, _) => OpenSetupPage(true)));
-        device.DropDownItems.Add(new ToolStripSeparator());
-        device.DropDownItems.Add(Item("Select All", (_, _) => SelectAll(true)));
-        device.DropDownItems.Add(Item("Select None", (_, _) => SelectAll(false)));
-        device.DropDownItems.Add(new ToolStripSeparator());
-        device.DropDownItems.Add(Item("Rename Selected Drive...", RenameDevice));
-        device.DropDownItems.Add(Item("Return USB to Writable Mode...", async (_, _) => await ReleaseManagedUsb()));
+
+        var drives = new ToolStripMenuItem("Drives");
+        drives.DropDownItems.Add(Item("Find Drives", async (_, _) => await RefreshDevices(), Keys.F5));
+        drives.DropDownItems.Add(Item("Refresh Drive Contents", async (_, _) => await RefreshFileMatrix(), Keys.Control | Keys.R));
+        drives.DropDownItems.Add(new ToolStripSeparator());
+        drives.DropDownItems.Add(Item("Select All Drives", (_, _) => SelectAll(true)));
+        drives.DropDownItems.Add(Item("Select No Drives", (_, _) => SelectAll(false)));
+        drives.DropDownItems.Add(new ToolStripSeparator());
+        drives.DropDownItems.Add(Item("Open Selected Drive's Setup Page", (_, _) => OpenSetupPage(true)));
+        drives.DropDownItems.Add(Item("Rename Selected Drive...", RenameDevice));
+        drives.DropDownItems.Add(Item("Return Selected Drives to Writable USB Mode...", async (_, _) => await ReleaseManagedUsb()));
+        drives.DropDownItems.Add(new ToolStripSeparator());
+        drives.DropDownItems.Add(Item("Install / Recover a Drive via USB...", RecoverUsb));
+
         var settings = new ToolStripMenuItem("Settings");
         settings.DropDownItems.Add(Item("Shop Management Key...", EditShopKey));
-        menu.Items.AddRange([file, device, settings]);
+
+        var help = new ToolStripMenuItem("Help");
+        help.DropDownItems.Add(Item("Check for Updates...", async (_, _) => await CheckForUpdates(true)));
+        help.DropDownItems.Add(new ToolStripSeparator());
+        help.DropDownItems.Add(Item("About Flying Thumb Manager", (_, _) => ShowAbout()));
+
+        menu.Items.AddRange([file, drives, settings, help]);
         return menu;
+    }
+
+    void ShowAbout()
+    {
+        MessageBox.Show(this,
+            $"Flying Thumb Manager\nVersion {UpdateService.CurrentManagerVersion}\n\nManage, synchronize, and update Flying Thumb drives over your shop network.",
+            "About Flying Thumb Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     static ToolStripMenuItem Item(string text, EventHandler click, Keys shortcut = Keys.None)
