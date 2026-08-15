@@ -72,10 +72,67 @@ public static class UpdateService
     public static void LaunchSelfUpdate(string downloadedExe)
     {
         var currentExe = Application.ExecutablePath;
-        var script = Path.Combine(Path.GetDirectoryName(downloadedExe)!, "install-manager-update.ps1");
-        File.WriteAllText(script, "param([int]$ProcessId,[string]$Source,[string]$Destination)\n$ErrorActionPreference='Stop'\n$process=Get-Process -Id $ProcessId -ErrorAction SilentlyContinue\nif($process){$process.WaitForExit()}\nCopy-Item -LiteralPath $Source -Destination $Destination -Force\nStart-Process -FilePath $Destination\nRemove-Item -LiteralPath $Source -Force -ErrorAction SilentlyContinue\nRemove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\n");
-        var start = new ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
-        foreach (var argument in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-ProcessId", Environment.ProcessId.ToString(), "-Source", downloadedExe, "-Destination", currentExe }) start.ArgumentList.Add(argument);
+        var start = new ProcessStartInfo(downloadedExe) { UseShellExecute = false, CreateNoWindow = true };
+        foreach (var argument in new[] { "--apply-manager-update", "--wait-pid", Environment.ProcessId.ToString(), "--destination", currentExe }) start.ArgumentList.Add(argument);
         Process.Start(start);
+    }
+
+    public static bool TryRunUpdateHelper(string[] args)
+    {
+        if (!args.Contains("--apply-manager-update", StringComparer.OrdinalIgnoreCase)) return false;
+
+        try
+        {
+            var processId = ArgumentValue(args, "--wait-pid");
+            var destination = ArgumentValue(args, "--destination");
+            if (!int.TryParse(processId, out var oldProcessId) || string.IsNullOrWhiteSpace(destination))
+                throw new InvalidOperationException("The update handoff information was incomplete.");
+
+            try
+            {
+                using var oldProcess = Process.GetProcessById(oldProcessId);
+                if (!oldProcess.WaitForExit(60_000))
+                    throw new TimeoutException("The previous Manager did not close within one minute.");
+            }
+            catch (ArgumentException)
+            {
+                // The old Manager already exited before the updater started.
+            }
+
+            var source = Environment.ProcessPath ?? Application.ExecutablePath;
+            Exception? lastCopyError = null;
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                try
+                {
+                    File.Copy(source, destination, true);
+                    lastCopyError = null;
+                    break;
+                }
+                catch (IOException ex) { lastCopyError = ex; Thread.Sleep(250); }
+                catch (UnauthorizedAccessException ex) { lastCopyError = ex; Thread.Sleep(250); }
+            }
+            if (lastCopyError is not null) throw new IOException("Windows would not replace the old Manager executable.", lastCopyError);
+
+            Process.Start(new ProcessStartInfo(destination)
+            {
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(destination) ?? Environment.CurrentDirectory
+            });
+        }
+        catch (Exception ex)
+        {
+            var logFolder = Path.Combine(Path.GetTempPath(), "FlyingThumb");
+            Directory.CreateDirectory(logFolder);
+            File.WriteAllText(Path.Combine(logFolder, "manager-update-error.txt"), ex.ToString());
+            MessageBox.Show("Flying Thumb Manager could not finish installing its update.\n\n" + ex.Message + "\n\nThe downloaded Manager can still be installed manually.", "Flying Thumb Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        return true;
+    }
+
+    static string? ArgumentValue(string[] args, string name)
+    {
+        var index = Array.FindIndex(args, value => value.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
     }
 }
