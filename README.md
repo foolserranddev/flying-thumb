@@ -1,6 +1,6 @@
 # Flying Thumb v2
 
-Flying Thumb turns a **LILYGO T-Dongle-S3** and microSD card into a Wi-Fi-managed USB drive. Version 2 adds automatic shop-wide discovery and the native Flying Thumb Manager for Windows.
+Flying Thumb Drive is a Wi-Fi-managed USB drive with removable storage. Version 2 adds automatic shop-wide discovery and the native Flying Thumb Manager for Windows.
 
 ## What is included
 
@@ -47,10 +47,10 @@ The **Files across all drives** view shows the additive union of filenames and c
 
 Choose **Sync...** to keep unique files additive across the included drives. For each differing same-name file, choose which drive's copy should win; check **Apply option to all files** to reuse that drive for the remaining conflicts. Select any number of file rows and right-click **Sync selected files...** to resolve or distribute only that selection; the one-row wording remains **Sync this file...**. Synchronization never deletes files. Select one or more rows and press **Delete**, or right-click and choose **Delete**, to remove every listed copy from the included drives after confirmation.
 
-Discovery, renaming, update checks, and USB installation/recovery live in the **File** and **Drives** menus. The manager checks for updates after discovering drives and also provides **File > Check for Updates**. When an update is available, choose **Update Now**; a typical drive update takes about five seconds.
+File operations live in the **File** menu, drive discovery and maintenance live in **Drives**, Manager-wide options live in **Settings**, and update checks and version information live in **Help**. The Manager also checks for updates after discovering drives. When an update is available, choose **Update Now** and keep the drives powered until they reconnect.
 ## Automatic update checks
 
-The first installation uses the USB button-hold installer. After that, the manager checks GitHub Releases after discovering drives and compares each discovered drive with the latest available software. It only displays an update notice when something can be updated. Choose **Update Now** to update every discovered outdated drive; a typical drive update takes about five seconds. Wi-Fi credentials, friendly names, shop keys, and microSD files are retained.
+The first installation uses the USB button-hold installer. After that, the Manager checks GitHub Releases after discovering drives and compares each discovered drive with the latest available software. It only displays an update notice when something can be updated. Choose **Update Now** to update every discovered outdated drive. Wi-Fi credentials, friendly names, shop keys, and microSD files are retained.
 
 Use **File > Check for Updates** to check manually. Downloads are delivered over HTTPS and verified against the SHA-256 values in the release manifest before installation.
 ## Removable demo drives
@@ -95,4 +95,4 @@ Uploads are transactional: data is written to a hidden temporary file, verified,
 - Red: USB write
 - Yellow: recent read and write
 
-The firmware uses LILYGO's official 16 MB flash, no-PSRAM T-Dongle-S3 hardware profile and the maintained PIOArduino ESP32 platform. The hardware pin assignments follow LILYGO's official T-Dongle-S3 documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.
+The firmware uses the supported 16 MB flash, no-PSRAM hardware profile and the maintained PIOArduino ESP32 platform. Its pin assignments follow the board vendor's official documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.

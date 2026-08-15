@@ -954,7 +954,6 @@ public sealed class MainForm : Form
                 if (outdatedDrives.Length > 0) parts.Add($"{outdatedDrives.Length} drive{(outdatedDrives.Length == 1 ? "" : "s")}");
                 if (managerNeedsUpdate) parts.Add("Flying Thumb Manager");
                 updateNotice.Text = "Update available for " + string.Join(" and ", parts) + ".";
-                if (outdatedDrives.Length > 0) updateNotice.Text += " Drive updates usually take about 5 seconds each.";
                 WriteLog(updateNotice.Text);
                 summary.Text = "Update available";
             }
@@ -982,7 +981,7 @@ public sealed class MainForm : Form
         if (outdatedDrives.Length > 0) description.Add($"update {outdatedDrives.Length} drive{(outdatedDrives.Length == 1 ? "" : "s")}");
         if (managerNeedsUpdate) description.Add("update Flying Thumb Manager");
         var updateDetails = outdatedDrives.Length > 0
-            ? "\n\nEach drive update usually takes about 5 seconds. Keep the drives powered until they reconnect."
+            ? "\n\nKeep the drives powered until they reconnect."
             : "\n\nThe Manager will close and restart automatically.";
         if (MessageBox.Show(this, "Ready to " + string.Join(" and ", description) + "." + updateDetails, "Install Flying Thumb Updates", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
 
@@ -1148,14 +1147,14 @@ public sealed class MainForm : Form
         SetBusy(false);
         var image = recovery.Path;
         var before = SerialPorts();
-        if (MessageBox.Show("1. Unplug the LILYGO completely.\n\n2. Press and keep holding its button.\n\n3. While still holding it, plug it directly into this PC.\n\n4. Keep holding until Windows detects the USB drive (usually 2-5 seconds), then release.\n\nClick OK afterward.", "USB recovery mode", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
+        if (MessageBox.Show("1. Unplug the Flying Thumb Drive completely.\n\n2. Press and keep holding its button.\n\n3. While still holding it, plug it directly into this PC.\n\n4. Keep holding until Windows detects the USB drive, then release.\n\nClick OK afterward.", "USB recovery mode", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
         string? port = null; for (var i = 0; i < 20 && port is null; i++) { var now = SerialPorts(); port = now.Except(before, StringComparer.OrdinalIgnoreCase).FirstOrDefault(); if (port is null && now.Length == 1) port = now[0]; if (port is null) await Task.Delay(500); }
         if (port is null)
         {
             var choices = SerialPorts();
             if (choices.Length == 0)
             {
-                MessageBox.Show("No USB recovery port appeared.\n\nUnplug the LILYGO, hold its button before plugging it directly into this PC, keep holding until Windows detects it, then try again.", "LILYGO not detected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("No USB recovery port appeared.\n\nUnplug the Flying Thumb Drive, hold its button before plugging it directly into this PC, keep holding until Windows detects it, then try again.", "Flying Thumb Drive not detected", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             port = choices.Length == 1 ? choices[0] : Prompt.Choose("Recovery USB port", "Choose USB port", choices);
@@ -1163,7 +1162,7 @@ public sealed class MainForm : Form
         }
         if (MessageBox.Show($"Install Flying Thumb firmware {recovery.Version} through {port}?\n\nSource: {recovery.Source}\nImage size: {new FileInfo(image).Length:N0} bytes\n\nTF-card files will not be erased.", "Confirm USB recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
         SetBusy(true); tabs.SelectedIndex = 1; WriteLog($"USB recovery started on {port}: installing firmware {recovery.Version} from {recovery.Source} ({new FileInfo(image).Length:N0} bytes).");
-        try { var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var a in new[] { "--chip", "esp32s3", "--port", port, "--baud", "921600", "write_flash", "0x0", image }) start.ArgumentList.Add(a); using var process = new Process { StartInfo = start }; process.OutputDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.ErrorDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); await process.WaitForExitAsync(); if (process.ExitCode != 0) throw new InvalidOperationException($"Flashing engine returned error {process.ExitCode}."); WriteLog($"USB installation completed successfully: firmware {recovery.Version} installed and verified."); MessageBox.Show($"Firmware {recovery.Version} installed successfully. Reconnect the LILYGO normally."); }
+        try { var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var a in new[] { "--chip", "esp32s3", "--port", port, "--baud", "921600", "write_flash", "0x0", image }) start.ArgumentList.Add(a); using var process = new Process { StartInfo = start }; process.OutputDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.ErrorDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); await process.WaitForExitAsync(); if (process.ExitCode != 0) throw new InvalidOperationException($"Flashing engine returned error {process.ExitCode}."); WriteLog($"USB installation completed successfully: firmware {recovery.Version} installed and verified."); MessageBox.Show($"Firmware {recovery.Version} installed successfully. Reconnect the Flying Thumb Drive normally."); }
         catch (Exception ex) { WriteLog("USB recovery FAILED - " + ex.Message); MessageBox.Show("USB installation failed. Repeat the button-hold insertion and try again.\n\n" + ex.Message); }
         finally { summary.Text = "USB recovery finished."; SetBusy(false); }
     }
