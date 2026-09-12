@@ -29,6 +29,8 @@ try {
         "release/FlyingThumbManager-Windows.zip",
         "release/FlyingThumb-v2-wifi-update.bin",
         "release/FlyingThumb-v2-full.bin",
+        "release/FlyingThumb-v2-screenless-wifi-update.bin",
+        "release/FlyingThumb-v2-screenless-full.bin",
         "release/latest.json"
     )
 

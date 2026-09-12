@@ -31,6 +31,8 @@ Use this same path to recover a dongle locally if a wireless firmware upgrade is
 
 After restarting, the setup hotspot turns off. The display shows the friendly machine name and IP address but never the joined Wi-Fi name.
 
+The factory external-antenna model without a screen uses its color LED instead: slow blue blinking while connecting (one second on and one second off), fast blue blinking during WPS, solid red when saved Wi-Fi cannot be reached, blinking red for a fault, solid green when connected, and blinking green while its setup hotspot is active. The Manager keeps this hardware profile through future wireless updates and offers the correct model during USB installation or recovery.
+
 A short button press starts a two-minute WPS window directly in the running firmware. USB storage remains connected throughout pairing; starting WPS does not reboot the dongle or reconnect its USB interfaces. The display reports success, failure, overlap, PIN mode, or a missing Push Button response. Holding the button for five seconds erases the stored Wi-Fi network and returns the drive to setup mode. The drive name and management key are retained.
 
 The LCD and backlight turn off after three minutes without a status change or button press. A short press while the screen is off only wakes the display; it does not start WPS. Holding for five seconds still performs the Wi-Fi reset. Firmware 2.4.12 and later favor connection range and reliability: Wi-Fi modem sleep is disabled and the radio requests the maximum permitted transmit power before attempting to connect, during WPS, and in setup access-point mode.
@@ -62,12 +64,16 @@ The sample set includes shared files, machine-specific files, missing-file cases
 
 - `dist/FlyingThumb-v2-full.bin` is the complete image for flashing at address `0x0`.
 - `dist/FlyingThumb-v2-wifi-update.bin` is the wireless drive-software update image.
+- `release/FlyingThumb-v2-screenless-full.bin` is the complete image for the external-antenna model without a screen.
+- `release/FlyingThumb-v2-screenless-wifi-update.bin` is its wireless update image.
 
 To build or upload through PlatformIO:
 
 ```powershell
 py -3 -m platformio run
 py -3 -m platformio run --target upload
+# Or build the external-antenna model without a screen:
+py -3 -m platformio run -e t-dongle-s3-screenless
 ```
 
 To rebuild the manager:
@@ -88,11 +94,8 @@ Every physical plug-in starts as a normal writable USB thumb drive. Discovery an
 
 Uploads are transactional: data is written to a hidden temporary file, verified, swapped into place while preserving the previous file as a rollback copy, and verified again. After a completed batch, the firmware reports a logical media change so the attached host reloads the directory; the ESP32 and USB controller remain connected. Manager 1.0.3 or newer refuses file changes on older firmware because the former surprise-disconnect method could damage FAT metadata.
 
-## Activity LED
+## Status and activity LED
 
-- Blue: idle
-- Green: USB read
-- Red: USB write
-- Yellow: recent read and write
+On the standard screen model, blue means idle, green means USB read, red means USB write, and yellow means recent reading and writing. On the external-antenna model without a screen, the LED reports the network and fault states described above.
 
 The firmware uses the supported 16 MB flash, no-PSRAM hardware profile and the maintained PIOArduino ESP32 platform. Its pin assignments follow the board vendor's official documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.

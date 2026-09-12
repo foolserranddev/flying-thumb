@@ -944,7 +944,14 @@ public sealed class MainForm : Form
         return failed == 0;
     }
 
-    Device[] DrivesNeedingUpdate(UpdateManifest manifest) => devices.Where(d => !d.IsSimulated && UpdateService.IsNewer(manifest.Firmware.Version, d.Firmware)).ToArray();
+    static UpdateAsset FirmwareFor(UpdateManifest manifest, Device device) => device.IsScreenless ? manifest.FirmwareScreenless : manifest.Firmware;
+    static UpdateAsset RecoveryFor(UpdateManifest manifest, bool screenless) => screenless ? manifest.RecoveryScreenless : manifest.Recovery;
+    Device[] DrivesNeedingUpdate(UpdateManifest manifest) => devices.Where(d =>
+    {
+        if (d.IsSimulated) return false;
+        var asset = FirmwareFor(manifest, d);
+        return !string.IsNullOrWhiteSpace(asset.Version) && UpdateService.IsNewer(asset.Version, d.Firmware);
+    }).ToArray();
 
     async Task CheckForUpdates(bool showResult)
     {
@@ -1021,14 +1028,22 @@ public sealed class MainForm : Form
             if (outdatedDrives.Length > 0)
             {
                 summary.Text = "Downloading drive update...";
-                var firmwarePath = await UpdateService.DownloadVerifiedAsync(manifest.Firmware, "FlyingThumb-v2-wifi-update.bin");
-                try { File.Copy(firmwarePath, Path.Combine(AppContext.BaseDirectory, "FlyingThumb-v2-wifi-update.bin"), true); } catch (Exception ex) { WriteLog("Could not cache the Wi-Fi update locally - " + ex.Message); }
-                if (!string.IsNullOrWhiteSpace(manifest.Recovery.Url))
+                var firmwarePaths = new Dictionary<bool, string>();
+                foreach (var screenless in outdatedDrives.Select(d => d.IsScreenless).Distinct())
                 {
+                    var firmwareAsset = screenless ? manifest.FirmwareScreenless : manifest.Firmware;
+                    var firmwareName = screenless ? "FlyingThumb-v2-screenless-wifi-update.bin" : "FlyingThumb-v2-wifi-update.bin";
+                    var firmwarePath = await UpdateService.DownloadVerifiedAsync(firmwareAsset, firmwareName);
+                    firmwarePaths[screenless] = firmwarePath;
+                    try { File.Copy(firmwarePath, Path.Combine(AppContext.BaseDirectory, firmwareName), true); } catch (Exception ex) { WriteLog("Could not cache the Wi-Fi update locally - " + ex.Message); }
+
+                    var recoveryAsset = RecoveryFor(manifest, screenless);
+                    var recoveryName = screenless ? "FlyingThumb-v2-screenless-full.bin" : "FlyingThumb-v2-full.bin";
+                    if (string.IsNullOrWhiteSpace(recoveryAsset.Url)) continue;
                     try
                     {
-                        var recoveryPath = await UpdateService.DownloadVerifiedAsync(manifest.Recovery, "FlyingThumb-v2-full.bin");
-                        File.Copy(recoveryPath, Path.Combine(AppContext.BaseDirectory, "FlyingThumb-v2-full.bin"), true);
+                        var recoveryPath = await UpdateService.DownloadVerifiedAsync(recoveryAsset, recoveryName);
+                        File.Copy(recoveryPath, Path.Combine(AppContext.BaseDirectory, recoveryName), true);
                     }
                     catch (Exception ex) { WriteLog("Could not refresh the USB recovery image - " + ex.Message); }
                 }
@@ -1038,7 +1053,7 @@ public sealed class MainForm : Form
                     try
                     {
                         SetStatus(device, "Installing update...");
-                        await client.UpgradeFirmwareAsync(device, firmwarePath, Key);
+                        await client.UpgradeFirmwareAsync(device, firmwarePaths[device.IsScreenless], Key);
                         lock (successfulDrives) successfulDrives.Add(device);
                         WriteLog($"{device.Name}: update installed; reconnecting.");
                     }
@@ -1120,27 +1135,31 @@ public sealed class MainForm : Form
         catch { return "unknown"; }
     }
 
-    async Task<(string Path, string Version, string Source)> ResolveRecoveryImage()
+    async Task<(string Path, string Version, string Source)> ResolveRecoveryImage(bool screenless)
     {
-        var localImage = Path.Combine(AppContext.BaseDirectory, "FlyingThumb-v2-full.bin");
+        var imageName = screenless ? "FlyingThumb-v2-screenless-full.bin" : "FlyingThumb-v2-full.bin";
+        var versionName = screenless ? "firmware-screenless-version.txt" : "firmware-version.txt";
+        var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
         try
         {
             summary.Text = "Checking for the latest recovery firmware...";
             var manifest = await UpdateService.GetLatestAsync();
-            var downloaded = await UpdateService.DownloadVerifiedAsync(manifest.Recovery, "FlyingThumb-v2-full.bin");
-            WriteLog($"Downloaded and verified USB recovery firmware {manifest.Recovery.Version}.");
+            var asset = RecoveryFor(manifest, screenless);
+            var downloaded = await UpdateService.DownloadVerifiedAsync(asset, imageName);
+            WriteLog($"Downloaded and verified USB recovery firmware {asset.Version}.");
             try
             {
                 File.Copy(downloaded, localImage, true);
-                File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "firmware-version.txt"), manifest.Recovery.Version);
+                File.WriteAllText(Path.Combine(AppContext.BaseDirectory, versionName), asset.Version);
             }
             catch (Exception ex) { WriteLog("Could not cache the verified recovery image locally - " + ex.Message); }
-            return (downloaded, manifest.Recovery.Version, "latest verified download");
+            return (downloaded, asset.Version, "latest verified download");
         }
         catch (Exception ex)
         {
             if (!File.Exists(localImage)) throw new InvalidOperationException("The latest recovery firmware could not be downloaded and no bundled recovery image is available.", ex);
-            var version = BundledFirmwareVersion();
+            var versionFile = Path.Combine(AppContext.BaseDirectory, versionName);
+            var version = File.Exists(versionFile) ? File.ReadAllText(versionFile).Trim() : "unknown";
             WriteLog($"Latest recovery check unavailable; using bundled firmware {version} - {ex.Message}");
             return (localImage, version, "bundled offline image");
         }
@@ -1150,9 +1169,12 @@ public sealed class MainForm : Form
     {
         var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
         if (!File.Exists(flasher)) { MessageBox.Show("The USB recovery tool is missing. Re-copy the complete manager folder."); return; }
+        var model = Prompt.Choose("Which Flying Thumb Drive are you installing?", "Choose Drive Model", ["Standard drive with screen", "External-antenna drive without screen"]);
+        if (model is null) return;
+        var screenless = model.StartsWith("External", StringComparison.OrdinalIgnoreCase);
         (string Path, string Version, string Source) recovery;
         SetBusy(true);
-        try { recovery = await ResolveRecoveryImage(); summary.Text = $"Recovery firmware {recovery.Version} ready."; }
+        try { recovery = await ResolveRecoveryImage(screenless); summary.Text = $"Recovery firmware {recovery.Version} ready."; }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Recovery Firmware Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error); SetBusy(false); return; }
         SetBusy(false);
         var image = recovery.Path;

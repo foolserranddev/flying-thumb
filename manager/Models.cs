@@ -8,6 +8,7 @@ public sealed class Device
     [JsonPropertyName("ip")] public string Ip { get; set; } = "";
     [JsonPropertyName("port")] public int Port { get; set; } = 80;
     [JsonPropertyName("firmware")] public string Firmware { get; set; } = "";
+    [JsonPropertyName("hardware")] public string Hardware { get; set; } = "lcd";
     [JsonPropertyName("storageFree")] public long StorageFree { get; set; }
     [JsonPropertyName("storageReady")] public bool StorageReady { get; set; }
     [JsonPropertyName("claimed")] public bool Claimed { get; set; }
@@ -15,6 +16,7 @@ public sealed class Device
     [JsonIgnore] public bool Selected { get; set; } = true;
     [JsonIgnore] public string Status { get; set; } = "Ready";
     [JsonIgnore] public bool IsSimulated { get; set; }
+    [JsonIgnore] public bool IsScreenless => Hardware.Equals("screenless-external-antenna", StringComparison.OrdinalIgnoreCase);
     [JsonIgnore] public string? RootPath { get; set; }
     [JsonIgnore] public string Free => IsSimulated || StorageReady ? FormatBytes(StorageFree) : "No card";
     [JsonIgnore] public Uri BaseUri => new($"http://{Ip}:{Port}/");

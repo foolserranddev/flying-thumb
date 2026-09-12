@@ -11,6 +11,8 @@ public sealed class UpdateManifest
     public UpdateAsset Manager { get; set; } = new();
     public UpdateAsset Firmware { get; set; } = new();
     public UpdateAsset Recovery { get; set; } = new();
+    public UpdateAsset FirmwareScreenless { get; set; } = new();
+    public UpdateAsset RecoveryScreenless { get; set; } = new();
     public string Notes { get; set; } = "";
 }
 

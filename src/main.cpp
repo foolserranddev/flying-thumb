@@ -76,13 +76,13 @@ void serviceButton() {
   const bool down = digitalRead(PIN_BUTTON) == LOW;
   if (down && !pressedAt) { pressedAt = millis(); resetHandled = false; wakeOnlyPress = wakeDisplay(); }
   if (down && !resetHandled && millis() - pressedAt >= RESET_HOLD_MS) {
-    resetHandled = true; displayMessage("RESETTING", "WiFi cleared", "Setup mode");
+    resetHandled = true; setDeviceStatus(DeviceStatus::SetupAccessPoint); displayMessage("RESETTING", "WiFi cleared", "Setup mode");
     clearNetworkSettings(); delay(800); ESP.restart();
   }
   if (!down && pressedAt) {
     const uint32_t duration = millis() - pressedAt; pressedAt = 0;
     if (!resetHandled && !wakeOnlyPress && duration >= DEBOUNCE_MS && duration < RESET_HOLD_MS) {
-      displayMessage("WPS STARTING", "Please wait", ""); beginWpsPairing();
+      setDeviceStatus(DeviceStatus::WpsSearching); displayMessage("WPS STARTING", "Please wait", ""); beginWpsPairing();
     }
     wakeOnlyPress = false;
   }
@@ -106,6 +106,7 @@ bool beginUsbFileUpdate() {
     delay(100);
     if (!SD_MMC.begin("/sdcard", false)) {
       usbDiskReady = false;
+      setDeviceStatus(DeviceStatus::Fault);
       displayMessage("TF CARD ERROR", "Managed mode failed", "Replug device");
       return false;
     }
@@ -130,6 +131,7 @@ bool finishUsbFileUpdate() {
   if (!SD_MMC.begin("/sdcard", false)) {
     usbDiskReady = false;
     usbUpdateActive = false;
+    setDeviceStatus(DeviceStatus::Fault);
     displayMessage("TF CARD ERROR", "USB refresh failed", "Replug device");
     return false;
   }
@@ -156,6 +158,7 @@ bool releaseUsbManagedMode() {
   delay(100);
   if (!SD_MMC.begin("/sdcard", false)) {
     usbDiskReady = false;
+    setDeviceStatus(DeviceStatus::Fault);
     displayMessage("TF CARD ERROR", "USB release failed", "Replug device");
     return false;
   }
@@ -170,6 +173,7 @@ bool releaseUsbManagedMode() {
 
 void setup() {
   Serial.begin(115200); pinMode(PIN_BUTTON, INPUT_PULLUP); initDisplay();
+  setDeviceStatus(DeviceStatus::Starting);
   displayMessage("FLYING THUMB", "Starting...", "");
   initNetworkAndServer();
   delay(50);
@@ -180,11 +184,12 @@ void setup() {
   } else {
     // Setup and recovery networking must remain usable even without a readable card.
     Serial.println("TF card unavailable; Wi-Fi setup remains active");
+    setDeviceStatus(DeviceStatus::Fault);
     displayMessage("TF CARD ERROR", "Card unavailable", "WiFi still ready");
   }
   finishOtaHealthCheck(cardReady);
 }
 void loop() {
   serviceButton(); handleNetworkAndServer();
-  setActivityLed(millis() - lastRead < 250, millis() - lastWrite < 250); handleDisplayPower(); delay(2);
+  setActivityLed(millis() - lastRead < 250, millis() - lastWrite < 250); handleStatusLed(); handleDisplayPower(); delay(2);
 }

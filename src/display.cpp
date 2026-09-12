@@ -2,20 +2,22 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include "board_config.h"
+#ifndef FLYING_THUMB_NO_DISPLAY
 #include "bsp_lcd/esp_lcd_st7735.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_heap_caps.h"
+#endif
 
 namespace {
+#ifndef FLYING_THUMB_NO_DISPLAY
 constexpr int LCD_W = 160;
 constexpr int LCD_H = 80;
 constexpr spi_host_device_t LCD_HOST = SPI2_HOST;
 esp_lcd_panel_handle_t panel = nullptr;
 esp_lcd_panel_io_handle_t panelIo = nullptr;
 uint16_t *frame = nullptr;
-CRGB led;
 bool displayAwake = false;
 uint32_t displayTouchedAt = 0;
 
@@ -63,9 +65,23 @@ void centered(const char *text, int y, int scale, uint16_t color) {
   for (char c : shown) { drawChar(x, y, c, scale, color); x += 6 * scale; }
 }
 void present() { if (panel && frame) { esp_lcd_panel_draw_bitmap(panel, 0, 0, LCD_W, LCD_H, frame); delay(20); } }
+#endif
+
+CRGB led;
+volatile DeviceStatus deviceStatus = DeviceStatus::Starting;
+uint32_t lastLedValue = 0xffffffff;
+
+void showLed(const CRGB &color) {
+  led = color;
+  FastLED.show();
+}
 }
 
 void initDisplay() {
+  FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1);
+  FastLED.setBrightness(24);
+  showLed(CRGB::Black);
+#ifndef FLYING_THUMB_NO_DISPLAY
   frame = static_cast<uint16_t *>(heap_caps_malloc(LCD_W * LCD_H * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (!frame) abort();
   pinMode(PIN_TFT_BL, OUTPUT); digitalWrite(PIN_TFT_BL, HIGH);
@@ -88,11 +104,12 @@ void initDisplay() {
   digitalWrite(PIN_TFT_BL, LOW);
   clear(0x07FF); present(); delay(350);
   displayAwake = true; displayTouchedAt = millis();
-  FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&led, 1); FastLED.setBrightness(24);
+#endif
 }
 
 
 void displayMessage(const char *title, const char *line1, const char *line2) {
+#ifndef FLYING_THUMB_NO_DISPLAY
   wakeDisplay();
   clear(0x0000);
   int titleScale = title && strlen(title) <= 13 ? 2 : 1;
@@ -100,9 +117,13 @@ void displayMessage(const char *title, const char *line1, const char *line2) {
   centered(line1, 44, 1, 0xFFFF);
   centered(line2, 62, 1, 0xFFFF);
   present();
+#else
+  (void)title; (void)line1; (void)line2;
+#endif
 }
 
 bool wakeDisplay() {
+#ifndef FLYING_THUMB_NO_DISPLAY
   const bool wasOff = !displayAwake;
   displayTouchedAt = millis();
   if (wasOff) {
@@ -112,15 +133,52 @@ bool wakeDisplay() {
     displayAwake = true;
   }
   return wasOff;
+#else
+  return false;
+#endif
 }
 
 void handleDisplayPower() {
+#ifndef FLYING_THUMB_NO_DISPLAY
   if (!displayAwake || millis() - displayTouchedAt < DISPLAY_IDLE_MS) return;
   digitalWrite(PIN_TFT_BL, HIGH);
   if (panel) esp_lcd_panel_disp_on_off(panel, false);
   displayAwake = false;
+#endif
 }
+
+void setDeviceStatus(DeviceStatus status) {
+  deviceStatus = status;
+}
+
+void handleStatusLed() {
+#ifdef FLYING_THUMB_NO_DISPLAY
+  const uint32_t now = millis();
+  CRGB color = CRGB::Black;
+  bool on = true;
+  const DeviceStatus status = deviceStatus;
+  switch (status) {
+    case DeviceStatus::Starting: on = false; break;
+    case DeviceStatus::SetupAccessPoint: color = CRGB::Green; on = ((now / 500) % 2) == 0; break;
+    case DeviceStatus::Connecting: color = CRGB::Blue; on = ((now / 1000) % 2) == 0; break;
+    case DeviceStatus::WpsSearching: color = CRGB::Blue; on = ((now / 200) % 2) == 0; break;
+    case DeviceStatus::Connected: color = CRGB::Green; break;
+    case DeviceStatus::WifiOffline: color = CRGB::Red; break;
+    case DeviceStatus::Fault: color = CRGB::Red; on = ((now / 300) % 2) == 0; break;
+  }
+  const CRGB output = on ? color : CRGB::Black;
+  const uint32_t value = (uint32_t(output.r) << 16) | (uint32_t(output.g) << 8) | output.b;
+  if (value == lastLedValue) return;
+  lastLedValue = value;
+  showLed(output);
+#endif
+}
+
 void setActivityLed(bool reading, bool writing) {
+#ifndef FLYING_THUMB_NO_DISPLAY
   static uint8_t old = 0xff; uint8_t state = (reading ? 1 : 0) | (writing ? 2 : 0); if (state == old) return; old = state;
   led = writing ? (reading ? CRGB::Yellow : CRGB::Red) : (reading ? CRGB::Green : CRGB::Blue); FastLED.show();
+#else
+  (void)reading; (void)writing;
+#endif
 }
