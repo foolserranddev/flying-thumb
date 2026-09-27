@@ -43,7 +43,9 @@ try {
     Copy-Item -LiteralPath "manager\assets\flying-thumb.png" -Destination "$package\assets\flying-thumb.png" -Force
     $flasherCandidates = @("dist\manager\FlyingThumbEsptool.exe", "work\esptool\FlyingThumbEsptool.exe", "work\esptool\dist\FlyingThumbEsptool.exe")
     $flasher = $flasherCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($flasher) { Copy-Item -LiteralPath $flasher -Destination "$package\FlyingThumbEsptool.exe" -Force }
+    if (!$flasher) { throw "The USB recovery helper has not been built." }
+    Copy-Item -LiteralPath $flasher -Destination "$package\FlyingThumbEsptool.exe" -Force
+    Copy-Item -LiteralPath $flasher -Destination "$output\FlyingThumbEsptool.exe" -Force
     "Run FlyingThumbManager.exe. Use Drives > Install / Recover a Drive via USB for first installation, or Help > Check for Updates for existing drives." | Set-Content -LiteralPath "$package\README.txt" -Encoding utf8
     Compress-Archive -Path "$package\*" -DestinationPath "$output\FlyingThumbManager-Windows.zip" -Force
 
@@ -51,6 +53,7 @@ try {
     $manifest = [ordered]@{
         schema = 1
         manager = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbManager.exe"; sha256 = (Get-FileHash $managerExe -Algorithm SHA256).Hash }
+        flasher = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumbEsptool.exe"; sha256 = (Get-FileHash "$output\FlyingThumbEsptool.exe" -Algorithm SHA256).Hash }
         firmware = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-wifi-update.bin"; sha256 = (Get-FileHash $wifiImage -Algorithm SHA256).Hash }
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
         firmwareScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-wifi-update.bin"; sha256 = (Get-FileHash $screenlessWifiImage -Algorithm SHA256).Hash }

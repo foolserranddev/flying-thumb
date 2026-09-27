@@ -1168,7 +1168,22 @@ public sealed class MainForm : Form
     async void RecoverUsb(object? sender, EventArgs e)
     {
         var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
-        if (!File.Exists(flasher)) { MessageBox.Show("The USB recovery tool is missing. Re-copy the complete manager folder."); return; }
+        if (!File.Exists(flasher))
+        {
+            SetBusy(true); summary.Text = "Downloading the USB installation helper...";
+            try
+            {
+                var manifest = await UpdateService.GetLatestAsync();
+                flasher = await UpdateService.DownloadVerifiedAsync(manifest.Flasher, "FlyingThumbEsptool.exe");
+                WriteLog("Downloaded and verified the USB installation helper.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "The USB installation helper is unavailable. Download the complete Manager package or try again while connected to the internet.\n\n" + ex.Message, "USB Installation Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            finally { SetBusy(false); }
+        }
         var model = Prompt.Choose("Which Flying Thumb Drive are you installing?", "Choose Drive Model", ["Standard drive with screen", "External-antenna drive without screen"]);
         if (model is null) return;
         var screenless = model.StartsWith("External", StringComparison.OrdinalIgnoreCase);

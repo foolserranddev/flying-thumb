@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [string]$Repository = "foolserranddev/flying-thumb",
+    [string]$AssetDirectory = "release",
     [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
@@ -25,13 +26,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not push tag $Tag." }
 
     $assets = @(
-        "release/FlyingThumbManager.exe",
-        "release/FlyingThumbManager-Windows.zip",
-        "release/FlyingThumb-v2-wifi-update.bin",
-        "release/FlyingThumb-v2-full.bin",
-        "release/FlyingThumb-v2-screenless-wifi-update.bin",
-        "release/FlyingThumb-v2-screenless-full.bin",
-        "release/latest.json"
+        "$AssetDirectory/FlyingThumbManager.exe",
+        "$AssetDirectory/FlyingThumbEsptool.exe",
+        "$AssetDirectory/FlyingThumbManager-Windows.zip",
+        "$AssetDirectory/FlyingThumb-v2-wifi-update.bin",
+        "$AssetDirectory/FlyingThumb-v2-full.bin",
+        "$AssetDirectory/FlyingThumb-v2-screenless-wifi-update.bin",
+        "$AssetDirectory/FlyingThumb-v2-screenless-full.bin",
+        "$AssetDirectory/latest.json"
     )
 
     $publishedReleases = $(gh release list --repo $Repository --limit 100 --json tagName) | ConvertFrom-Json

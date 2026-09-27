@@ -37,6 +37,7 @@ jobs:
           generate_release_notes: true
           files: |
             release/FlyingThumbManager.exe
+            release/FlyingThumbEsptool.exe
             release/FlyingThumbManager-Windows.zip
             release/FlyingThumb-v2-wifi-update.bin
             release/FlyingThumb-v2-full.bin

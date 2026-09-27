@@ -9,6 +9,7 @@ public sealed class UpdateManifest
 {
     public int Schema { get; set; }
     public UpdateAsset Manager { get; set; } = new();
+    public UpdateAsset Flasher { get; set; } = new();
     public UpdateAsset Firmware { get; set; } = new();
     public UpdateAsset Recovery { get; set; } = new();
     public UpdateAsset FirmwareScreenless { get; set; } = new();
