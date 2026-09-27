@@ -88,6 +88,8 @@ Mutating HTTP requests use the `X-FlyingThumb-Key` header. Credentials and manag
 
 Every physical plug-in starts as a normal writable USB thumb drive. Discovery and file viewing do not change that state. During a Manager/web file mutation, firmware 2.4.9 or newer briefly pauses USB access and grants the network side exclusive write control. When the complete batch finishes, it flushes and remounts the card, then reconnects it to the attached machine as writable automatically. **Drives > Return USB to Writable Mode...** remains available as a recovery action for older firmware or an interrupted operation.
 
+Firmware 2.4.15 and later batches consecutive sectors into native microSD multi-block operations for substantially faster direct USB file copies. Network uploads use the mounted filesystem's buffered file API and do not pass through the raw USB sector callback.
+
 Uploads are transactional: data is written to a hidden temporary file, verified, swapped into place while preserving the previous file as a rollback copy, and verified again. After a completed batch, the firmware reports a logical media change so the attached host reloads the directory; the ESP32 and USB controller remain connected. Manager 1.0.3 or newer refuses file changes on older firmware because the former surprise-disconnect method could damage FAT metadata.
 
 ## Status LED

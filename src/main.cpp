@@ -3,6 +3,8 @@
 #include <USB.h>
 #include <USBMSC.h>
 #include <tusb.h>
+#include <diskio.h>
+#include <diskio_impl.h>
 #include "board_config.h"
 #include "display.h"
 #include "fileserver.h"
@@ -17,6 +19,22 @@ bool resetHandled = false;
 bool wakeOnlyPress = false;
 bool usbDiskReady = false, usbUpdateActive = false, usbManagedMode = false;
 volatile bool usbWritesBlocked = false;
+BYTE rawDrive = FF_DRV_NOT_USED;
+
+void locateRawDrive() {
+  rawDrive = FF_DRV_NOT_USED;
+  const LBA_t expectedSectors = SD_MMC.numSectors();
+  for (BYTE drive = 0; drive < FF_VOLUMES; ++drive) {
+    if (disk_status(drive) & (STA_NOINIT | STA_NODISK)) continue;
+    LBA_t sectors = 0;
+    if (disk_ioctl(drive, GET_SECTOR_COUNT, &sectors) == RES_OK && sectors == expectedSectors) {
+      rawDrive = drive;
+      Serial.printf("SD raw drive %u supports multi-sector USB transfers\n", rawDrive);
+      return;
+    }
+  }
+  Serial.println("SD raw drive not found; USB transfers will use single-sector fallback");
+}
 
 int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
   if (usbWritesBlocked) return -1;
@@ -28,6 +46,14 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
     const uint32_t absolute = offset + completed;
     const uint32_t targetLba = lba + absolute / sector;
     const uint32_t withinSector = absolute % sector;
+    const uint32_t remaining = size - completed;
+    if (withinSector == 0 && remaining >= sector && rawDrive != FF_DRV_NOT_USED &&
+        (reinterpret_cast<uintptr_t>(buffer + completed) & 3) == 0) {
+      const UINT sectorCount = remaining / sector;
+      if (disk_write(rawDrive, buffer + completed, targetLba, sectorCount) != RES_OK) return -1;
+      completed += sectorCount * sector;
+      continue;
+    }
     const uint32_t chunk = min(size - completed, sector - withinSector);
     if (withinSector == 0 && chunk == sector) {
       if (!SD_MMC.writeRAW(buffer + completed, targetLba)) return -1;
@@ -51,6 +77,14 @@ int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t size) {
     const uint32_t absolute = offset + completed;
     const uint32_t sourceLba = lba + absolute / sector;
     const uint32_t withinSector = absolute % sector;
+    const uint32_t remaining = size - completed;
+    if (withinSector == 0 && remaining >= sector && rawDrive != FF_DRV_NOT_USED &&
+        (reinterpret_cast<uintptr_t>(destination + completed) & 3) == 0) {
+      const UINT sectorCount = remaining / sector;
+      if (disk_read(rawDrive, destination + completed, sourceLba, sectorCount) != RES_OK) return -1;
+      completed += sectorCount * sector;
+      continue;
+    }
     const uint32_t chunk = min(size - completed, sector - withinSector);
     if (withinSector == 0 && chunk == sector) {
       if (!SD_MMC.readRAW(destination + completed, sourceLba)) return -1;
@@ -65,6 +99,7 @@ int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t size) {
 }
 bool onStartStop(uint8_t, bool, bool) { return true; }
 void startUsbDisk() {
+  locateRawDrive();
   msc.vendorID("FlyingThumb"); msc.productID("WiFi Storage"); msc.productRevision("1.0");
   msc.onRead(onRead); msc.onWrite(onWrite); msc.onStartStop(onStartStop);
   msc.isWritable(true);
@@ -110,6 +145,7 @@ bool beginUsbFileUpdate() {
       displayMessage("TF CARD ERROR", "Managed mode failed", "Replug device");
       return false;
     }
+    locateRawDrive();
     msc.mediaPresent(true);
     delay(250);
     usbManagedMode = true;
@@ -135,6 +171,7 @@ bool finishUsbFileUpdate() {
     displayMessage("TF CARD ERROR", "USB refresh failed", "Replug device");
     return false;
   }
+  locateRawDrive();
   msc.isWritable(true);
   usbManagedMode = false;
   usbWritesBlocked = false;
@@ -162,6 +199,7 @@ bool releaseUsbManagedMode() {
     displayMessage("TF CARD ERROR", "USB release failed", "Replug device");
     return false;
   }
+  locateRawDrive();
   msc.isWritable(true);
   usbManagedMode = false;
   usbWritesBlocked = false;

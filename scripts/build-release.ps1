@@ -58,7 +58,7 @@ try {
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
         firmwareScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-wifi-update.bin"; sha256 = (Get-FileHash $screenlessWifiImage -Algorithm SHA256).Hash }
         recoveryScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-full.bin"; sha256 = (Get-FileHash $screenlessFullImage -Algorithm SHA256).Hash }
-        notes = "USB installation now selects the current LED-status Flying Thumb hardware automatically."
+        notes = "Accelerates direct USB file copies by batching consecutive microSD sectors into multi-block transfers."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime
