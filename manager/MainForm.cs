@@ -1184,12 +1184,9 @@ public sealed class MainForm : Form
             }
             finally { SetBusy(false); }
         }
-        var model = Prompt.Choose("Which Flying Thumb Drive are you installing?", "Choose Drive Model", ["Standard drive with screen", "External-antenna drive without screen"]);
-        if (model is null) return;
-        var screenless = model.StartsWith("External", StringComparison.OrdinalIgnoreCase);
         (string Path, string Version, string Source) recovery;
         SetBusy(true);
-        try { recovery = await ResolveRecoveryImage(screenless); summary.Text = $"Recovery firmware {recovery.Version} ready."; }
+        try { recovery = await ResolveRecoveryImage(screenless: true); summary.Text = $"Recovery firmware {recovery.Version} ready."; }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Recovery Firmware Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error); SetBusy(false); return; }
         SetBusy(false);
         var image = recovery.Path;
