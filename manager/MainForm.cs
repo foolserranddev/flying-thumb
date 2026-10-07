@@ -1169,6 +1169,34 @@ public sealed class MainForm : Form
         return key?.GetValueNames().Select(n => key.GetValue(n)?.ToString()).Where(v => !string.IsNullOrWhiteSpace(v)).Cast<string>().Distinct(StringComparer.OrdinalIgnoreCase).Order().ToArray() ?? [];
     }
 
+    async Task<string[]> IdentifyEsp32RecoveryPorts(string flasher, IEnumerable<string> candidates)
+    {
+        var matches = new List<string>();
+        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+                foreach (var argument in new[] { "--chip", "esp32s3", "--port", candidate, "--before", "no_reset", "--after", "no_reset", "chip_id" }) start.ArgumentList.Add(argument);
+                using var process = new Process { StartInfo = start };
+                process.Start();
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
+                var exitTask = process.WaitForExitAsync();
+                if (await Task.WhenAny(exitTask, Task.Delay(4000)) != exitTask)
+                {
+                    process.Kill(true);
+                    await process.WaitForExitAsync();
+                    continue;
+                }
+                var output = (await outputTask) + (await errorTask);
+                if (process.ExitCode == 0 && output.Contains("ESP32-S3", StringComparison.OrdinalIgnoreCase)) matches.Add(candidate);
+            }
+            catch { }
+        }
+        return matches.ToArray();
+    }
+
     static string BundledFirmwareVersion()
     {
         try
@@ -1245,7 +1273,21 @@ public sealed class MainForm : Form
                 MessageBox.Show("No USB recovery port appeared.\n\nUnplug the Flying Thumb Drive, hold its button before plugging it directly into this PC, keep holding until Windows detects it, then try again.", "Flying Thumb Drive not detected", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            port = choices.Length == 1 ? choices[0] : Prompt.Choose("Recovery USB port", "Choose USB port", choices);
+            summary.Text = "Identifying the Flying Thumb recovery port...";
+            var identified = await IdentifyEsp32RecoveryPorts(flasher, choices);
+            if (identified.Length == 1)
+            {
+                port = identified[0];
+                WriteLog($"Identified {port} as the ESP32-S3 recovery port.");
+            }
+            else
+            {
+                var promptChoices = identified.Length > 1 ? identified : choices;
+                var prompt = identified.Length > 1
+                    ? "More than one ESP32-S3 recovery device answered. Choose the Flying Thumb port."
+                    : "The Manager could not positively identify the recovery device. Unplugging it will reveal which port disappears.";
+                port = promptChoices.Length == 1 ? promptChoices[0] : Prompt.Choose(prompt, "Choose USB port", promptChoices);
+            }
             if (string.IsNullOrWhiteSpace(port)) return;
         }
         if (MessageBox.Show($"Install Flying Thumb firmware {recovery.Version} through {port}?\n\nSource: {recovery.Source}\nImage size: {new FileInfo(image).Length:N0} bytes\n\nTF-card files will not be erased.", "Confirm USB recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
