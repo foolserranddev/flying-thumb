@@ -32,6 +32,16 @@ public static class UpdateService
 
     public static string CurrentManagerVersion => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
+    public static void CleanupPreviousExecutable()
+    {
+        try
+        {
+            var previous = Application.ExecutablePath + ".previous";
+            if (File.Exists(previous)) File.Delete(previous);
+        }
+        catch { }
+    }
+
     public static async Task<UpdateManifest> GetLatestAsync()
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, ManifestUrl + "?check=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds());
@@ -104,7 +114,7 @@ public static class UpdateService
 
             var source = Environment.ProcessPath ?? Application.ExecutablePath;
             Exception? lastCopyError = null;
-            for (var attempt = 0; attempt < 20; attempt++)
+            for (var attempt = 0; attempt < 120; attempt++)
             {
                 try
                 {
@@ -112,10 +122,29 @@ public static class UpdateService
                     lastCopyError = null;
                     break;
                 }
-                catch (IOException ex) { lastCopyError = ex; Thread.Sleep(250); }
-                catch (UnauthorizedAccessException ex) { lastCopyError = ex; Thread.Sleep(250); }
+                catch (IOException ex) { lastCopyError = ex; Thread.Sleep(500); }
+                catch (UnauthorizedAccessException ex) { lastCopyError = ex; Thread.Sleep(500); }
             }
-            if (lastCopyError is not null) throw new IOException("Windows would not replace the old Manager executable.", lastCopyError);
+            if (lastCopyError is not null)
+            {
+                var previous = destination + ".previous";
+                try
+                {
+                    if (File.Exists(previous)) File.Delete(previous);
+                    File.Move(destination, previous);
+                    try { File.Copy(source, destination, false); }
+                    catch
+                    {
+                        if (!File.Exists(destination) && File.Exists(previous)) File.Move(previous, destination);
+                        throw;
+                    }
+                    lastCopyError = null;
+                }
+                catch (Exception fallbackError)
+                {
+                    throw new IOException("Windows still has another copy of Flying Thumb Manager open. Close every Manager window, then run the downloaded update again.", new AggregateException(lastCopyError, fallbackError));
+                }
+            }
 
             Process.Start(new ProcessStartInfo(destination)
             {
@@ -128,7 +157,7 @@ public static class UpdateService
             var logFolder = Path.Combine(Path.GetTempPath(), "FlyingThumb");
             Directory.CreateDirectory(logFolder);
             File.WriteAllText(Path.Combine(logFolder, "manager-update-error.txt"), ex.ToString());
-            MessageBox.Show("Flying Thumb Manager could not finish installing its update.\n\n" + ex.Message + "\n\nThe downloaded Manager can still be installed manually.", "Flying Thumb Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show("Flying Thumb Manager could not finish installing its update.\n\n" + ex.Message + "\n\nThe downloaded Manager remains available for manual installation.", "Flying Thumb Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         return true;
     }

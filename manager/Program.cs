@@ -7,6 +7,7 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
         if (UpdateService.TryRunUpdateHelper(args)) return;
+        UpdateService.CleanupPreviousExecutable();
         Application.Run(new MainForm());
     }
 }
