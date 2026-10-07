@@ -257,6 +257,7 @@ public sealed class MainForm : Form
         drives.DropDownItems.Add(Item("Return Selected Drives to Writable USB Mode...", async (_, _) => await ReleaseManagedUsb()));
         drives.DropDownItems.Add(new ToolStripSeparator());
         drives.DropDownItems.Add(Item("Install / Recover a Drive via USB...", RecoverUsb));
+        drives.DropDownItems.Add(Item("Diagnose a Drive via USB...", DiagnoseUsb));
 
         var settings = new ToolStripMenuItem("Settings");
         settings.DropDownItems.Add(Item("Shop Management Key...", EditShopKey));
@@ -1197,6 +1198,110 @@ public sealed class MainForm : Form
         return matches.ToArray();
     }
 
+    async Task<(int ExitCode, string Output)> RunFlasherDiagnostic(string flasher, string port, params string[] command)
+    {
+        var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        foreach (var argument in new[] { "--chip", "esp32s3", "--port", port, "--before", "no_reset", "--after", "no_reset" }.Concat(command)) start.ArgumentList.Add(argument);
+        using var process = new Process { StartInfo = start };
+        process.Start();
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        var exitTask = process.WaitForExitAsync();
+        if (await Task.WhenAny(exitTask, Task.Delay(TimeSpan.FromMinutes(3))) != exitTask)
+        {
+            process.Kill(true);
+            await process.WaitForExitAsync();
+            return (-1, "Diagnostic timed out.");
+        }
+        return (process.ExitCode, ((await outputTask) + (await errorTask)).Trim());
+    }
+
+    async Task<string?> ChooseRecoveryPort(string flasher)
+    {
+        var choices = SerialPorts();
+        if (choices.Length == 0) return null;
+        summary.Text = "Identifying the Flying Thumb recovery port...";
+        var identified = await IdentifyEsp32RecoveryPorts(flasher, choices);
+        if (identified.Length == 1) return identified[0];
+        var promptChoices = identified.Length > 1 ? identified : choices;
+        var prompt = identified.Length > 1
+            ? "More than one ESP32-S3 recovery device answered. Choose the Flying Thumb port."
+            : "The Manager could not positively identify the recovery device. Unplugging it will reveal which port disappears.";
+        return promptChoices.Length == 1 ? promptChoices[0] : Prompt.Choose(prompt, "Choose USB port", promptChoices);
+    }
+
+    async void DiagnoseUsb(object? sender, EventArgs e)
+    {
+        var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
+        if (!File.Exists(flasher))
+        {
+            MessageBox.Show(this, "The USB diagnostic helper is missing. Download the complete Manager package or run the Manager while connected to the internet once.", "USB Diagnostics Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        if (MessageBox.Show(this, "Unplug the Flying Thumb Drive. Hold its button while plugging it directly into this PC, keep holding until Windows detects it, then release the button and click OK.", "Flying Thumb USB Diagnostics", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+        var port = await ChooseRecoveryPort(flasher);
+        if (string.IsNullOrWhiteSpace(port))
+        {
+            MessageBox.Show(this, "No ESP32-S3 recovery port was found.", "Flying Thumb USB Diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        SetBusy(true); tabs.SelectedIndex = 1; summary.Text = $"Diagnosing Flying Thumb on {port}...";
+        var report = new List<string> { $"Flying Thumb USB diagnostic", $"Time: {DateTime.Now:F}", $"Recovery port: {port}", "" };
+        var passed = 0;
+        try
+        {
+            foreach (var test in new[]
+            {
+                (Name: "Processor connection", Command: new[] { "chip_id" }),
+                (Name: "Onboard flash", Command: new[] { "flash_id" }),
+                (Name: "Security configuration", Command: new[] { "get_security_info" })
+            })
+            {
+                WriteLog($"USB diagnostic: {test.Name}...");
+                var result = await RunFlasherDiagnostic(flasher, port, test.Command);
+                report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] {test.Name}");
+                report.Add(result.Output); report.Add("");
+                if (result.ExitCode == 0) passed++;
+            }
+
+            (string Path, string Version, string Source) recovery;
+            try { recovery = await ResolveRecoveryImage(screenless: true); }
+            catch (Exception ex)
+            {
+                report.Add("[SKIPPED] Installed firmware comparison");
+                report.Add("A verified recovery image was unavailable: " + ex.Message);
+                recovery = ("", "unknown", "unavailable");
+            }
+            if (recovery.Path.Length > 0)
+            {
+                WriteLog($"USB diagnostic: comparing installed flash with firmware {recovery.Version}...");
+                var result = await RunFlasherDiagnostic(flasher, port, "verify_flash", "0x0", recovery.Path);
+                report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] Installed firmware matches {recovery.Version}");
+                report.Add(result.Output); report.Add("");
+                if (result.ExitCode == 0) passed++;
+            }
+
+            var reportFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb");
+            Directory.CreateDirectory(reportFolder);
+            var reportPath = Path.Combine(reportFolder, $"diagnostic-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+            File.WriteAllLines(reportPath, report);
+            foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
+            var conclusion = passed == 4
+                ? "The processor, onboard flash, and installed firmware all passed. If normal USB and Wi-Fi are still absent after unplugging and reconnecting, this points to a startup/hardware or board-revision problem."
+                : $"{passed} of 4 diagnostic checks passed. The report contains the failing stage.";
+            MessageBox.Show(this, conclusion + $"\n\nReport saved to:\n{reportPath}\n\nUnplug and reconnect the drive normally after closing this message.", "Flying Thumb USB Diagnostic Results", MessageBoxButtons.OK, passed == 4 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            summary.Text = $"USB diagnostics finished: {passed}/4 checks passed";
+        }
+        catch (Exception ex)
+        {
+            WriteLog("USB diagnostics FAILED - " + ex.Message);
+            MessageBox.Show(this, "USB diagnostics could not finish.\n\n" + ex.Message, "Flying Thumb USB Diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            summary.Text = "USB diagnostics failed";
+        }
+        finally { SetBusy(false); }
+    }
+
     static string BundledFirmwareVersion()
     {
         try
@@ -1273,21 +1378,7 @@ public sealed class MainForm : Form
                 MessageBox.Show("No USB recovery port appeared.\n\nUnplug the Flying Thumb Drive, hold its button before plugging it directly into this PC, keep holding until Windows detects it, then try again.", "Flying Thumb Drive not detected", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            summary.Text = "Identifying the Flying Thumb recovery port...";
-            var identified = await IdentifyEsp32RecoveryPorts(flasher, choices);
-            if (identified.Length == 1)
-            {
-                port = identified[0];
-                WriteLog($"Identified {port} as the ESP32-S3 recovery port.");
-            }
-            else
-            {
-                var promptChoices = identified.Length > 1 ? identified : choices;
-                var prompt = identified.Length > 1
-                    ? "More than one ESP32-S3 recovery device answered. Choose the Flying Thumb port."
-                    : "The Manager could not positively identify the recovery device. Unplugging it will reveal which port disappears.";
-                port = promptChoices.Length == 1 ? promptChoices[0] : Prompt.Choose(prompt, "Choose USB port", promptChoices);
-            }
+            port = await ChooseRecoveryPort(flasher);
             if (string.IsNullOrWhiteSpace(port)) return;
         }
         if (MessageBox.Show($"Install Flying Thumb firmware {recovery.Version} through {port}?\n\nSource: {recovery.Source}\nImage size: {new FileInfo(image).Length:N0} bytes\n\nTF-card files will not be erased.", "Confirm USB recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;

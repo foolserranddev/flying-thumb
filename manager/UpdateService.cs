@@ -142,7 +142,7 @@ public static class UpdateService
                 }
                 catch (Exception fallbackError)
                 {
-                    throw new IOException("Windows still has another copy of Flying Thumb Manager open. Close every Manager window, then run the downloaded update again.", new AggregateException(lastCopyError, fallbackError));
+                    throw new IOException("Windows still has another copy of Flying Thumb Manager open. Close every Manager window, then run the downloaded update again.", new AggregateException(lastCopyError!, fallbackError));
                 }
             }
 
