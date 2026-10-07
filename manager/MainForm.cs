@@ -8,6 +8,7 @@ namespace FlyingThumbManager;
 
 public sealed class MainForm : Form
 {
+    sealed record UploadItem(string LocalPath, string RemotePath);
     readonly BindingList<Device> devices = [];
     readonly FlyingThumbClient client = new();
     readonly DataGridView deviceGrid = new();
@@ -65,7 +66,7 @@ public sealed class MainForm : Form
         var menu = BuildMenu();
         var dropHint = new Label
         {
-            Text = "  Flying Thumb  >  Included drives  >  Files        Drop files here to add them",
+            Text = "  Flying Thumb  >  Included drives  >  Files        Drop files or folders here to add them",
             AutoSize = true,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
@@ -131,7 +132,7 @@ public sealed class MainForm : Form
         deleteFilesButton.Click += async (_, _) => await DeleteSelectedFiles();
         updateNowButton.Click += async (_, _) => await InstallAvailableUpdates();
         DragEnter += (_, e) => { if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy; };
-        DragDrop += async (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddFiles(paths.Where(File.Exists).ToArray()); };
+        DragDrop += async (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddPaths(paths); };
         split.SizeChanged += (_, _) => ApplyResponsiveSplit();
         setupNetworkTimer.Tick += (_, _) => CheckForSetupNetwork();
         Shown += async (_, _) => { WriteLog($"Flying Thumb Manager {UpdateService.CurrentManagerVersion} started."); await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
@@ -238,6 +239,7 @@ public sealed class MainForm : Form
         var menu = new MenuStrip { BackColor = Color.White, RenderMode = ToolStripRenderMode.System, Padding = new Padding(8, 3, 0, 3) };
         var file = new ToolStripMenuItem("File");
         file.DropDownItems.Add(Item("Add Files...", async (_, _) => await ChooseAndAddFiles(), Keys.Control | Keys.O));
+        file.DropDownItems.Add(Item("Add Folder...", async (_, _) => await ChooseAndAddFolder()));
         file.DropDownItems.Add(Item("Sync Selected Files", async (_, _) => await ChooseAndSync(), Keys.Control | Keys.Shift | Keys.S));
         file.DropDownItems.Add(Item("Delete Selected Files...", async (_, _) => await DeleteSelectedFiles()));
         file.DropDownItems.Add(new ToolStripSeparator());
@@ -356,6 +358,7 @@ public sealed class MainForm : Form
     }
     static bool UsesManagedUsb(Device device) => FirmwareAtLeast(device, 2, 2, 0);
     static bool SupportsUsbRelease(Device device) => FirmwareAtLeast(device, 2, 3, 0);
+    static bool SupportsFolders(Device device) => device.IsSimulated || FirmwareAtLeast(device, 2, 5, 0);
     static string ReadyStatus(Device device) => device.IsSimulated ? "Simulated" : device.UsbManaged ? "Manager controls files - USB read-only" : "Ready";
     bool EnsureManagedFirmware(Device[] targets)
     {
@@ -363,6 +366,15 @@ public sealed class MainForm : Form
         if (outdated.Length == 0) return true;
         MessageBox.Show(this,
             "Update required before changing files on: " + string.Join(", ", outdated) + ".\n\nFile changes are disabled on older firmware to protect the TF card while USB is attached. Choose File > Check for Updates, install the drive update, then try again.",
+            "Drive Update Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
+    }
+    bool EnsureFolderFirmware(Device[] targets)
+    {
+        var outdated = targets.Where(device => !SupportsFolders(device)).Select(device => device.Name).ToArray();
+        if (outdated.Length == 0) return true;
+        MessageBox.Show(this,
+            "A drive update is required before using folders on: " + string.Join(", ", outdated) + ".\n\nChoose Help > Check for Updates, install the drive update, then try again. This prevents older firmware from flattening nested paths into the root folder.",
             "Drive Update Required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         return false;
     }
@@ -410,14 +422,14 @@ public sealed class MainForm : Form
         fileGrid.EndEdit();
         return fileGrid.Rows.Cast<DataGridViewRow>().Where(row => row.Cells["FileChecked"].Value is true)
             .Select(row => row.Cells["FileName"].Value?.ToString()).Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => Path.GetFileName(name!)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            .Select(name => FlyingThumbClient.NormalizeRemotePath(name!)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
     string[] ChosenFileNames()
     {
         var checkedNames = CheckedFileNames();
         if (checkedNames.Length > 0) return checkedNames;
         return fileGrid.SelectedRows.Cast<DataGridViewRow>().Select(row => row.Cells["FileName"].Value?.ToString())
-            .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => Path.GetFileName(name!))
+            .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => FlyingThumbClient.NormalizeRemotePath(name!))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
     void ToggleAllFiles()
@@ -504,17 +516,17 @@ public sealed class MainForm : Form
     void RecordUploadedFile(Device device, string name, long size)
     {
         if (!inventories.TryGetValue(device.Id, out var files)) inventories[device.Id] = files = [];
-        var fileName = Path.GetFileName(name);
-        var existing = files.FirstOrDefault(f => f.Type == "file" && string.Equals(Path.GetFileName(f.Name), fileName, StringComparison.OrdinalIgnoreCase));
-        if (existing is null) files.Add(new RemoteFile { Name = "/" + fileName, Size = size, Type = "file" });
-        else { existing.Name = "/" + fileName; existing.Size = size; }
+        var remotePath = FlyingThumbClient.NormalizeRemotePath(name);
+        var existing = files.FirstOrDefault(f => f.Type == "file" && string.Equals(FlyingThumbClient.NormalizeRemotePath(f.Name), remotePath, StringComparison.OrdinalIgnoreCase));
+        if (existing is null) files.Add(new RemoteFile { Name = "/" + remotePath, Size = size, Type = "file" });
+        else { existing.Name = "/" + remotePath; existing.Size = size; }
     }
 
     void RecordDeletedFile(Device device, string name)
     {
         if (!inventories.TryGetValue(device.Id, out var files)) return;
-        var fileName = Path.GetFileName(name);
-        files.RemoveAll(f => f.Type == "file" && string.Equals(Path.GetFileName(f.Name), fileName, StringComparison.OrdinalIgnoreCase));
+        var remotePath = FlyingThumbClient.NormalizeRemotePath(name);
+        files.RemoveAll(f => f.Type == "file" && string.Equals(FlyingThumbClient.NormalizeRemotePath(f.Name), remotePath, StringComparison.OrdinalIgnoreCase));
     }
     async Task RefreshDevices()
     {
@@ -600,7 +612,7 @@ public sealed class MainForm : Form
     void RenderFileMatrix()
     {
         var shown = devices.Where(d => d.Selected).ToArray();
-        var names = shown.Where(d => inventories.ContainsKey(d.Id)).SelectMany(d => inventories[d.Id]).Where(x => x.Type == "file").Select(x => Path.GetFileName(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        var names = shown.Where(d => inventories.ContainsKey(d.Id)).SelectMany(d => inventories[d.Id]).Where(x => x.Type == "file").Select(x => FlyingThumbClient.NormalizeRemotePath(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         checkedFiles.IntersectWith(names);
         renderingFileMatrix = true;
         fileGrid.SuspendLayout();
@@ -614,7 +626,7 @@ public sealed class MainForm : Form
         foreach (var d in shown) fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = d.Name, ReadOnly = true, FillWeight = 75 });
         foreach (var name in names)
         {
-            var entries = shown.Select(d => inventories.TryGetValue(d.Id, out var files) ? files.FirstOrDefault(f => string.Equals(Path.GetFileName(f.Name), name, StringComparison.OrdinalIgnoreCase)) : null).ToArray();
+            var entries = shown.Select(d => inventories.TryGetValue(d.Id, out var files) ? files.FirstOrDefault(f => string.Equals(FlyingThumbClient.NormalizeRemotePath(f.Name), name, StringComparison.OrdinalIgnoreCase)) : null).ToArray();
             var sizes = entries.Where(x => x is not null).Select(x => x!.Size).Distinct().ToArray();
             var state = sizes.Length > 1 ? "CONFLICT" : entries.All(x => x is not null) ? "On every included drive" : $"On {entries.Count(x => x is not null)}/{shown.Length}";
             var cells = new List<object> { checkedFiles.Contains(name), name, state };
@@ -651,7 +663,7 @@ public sealed class MainForm : Form
         if (names.Length == 0) return;
 
         var included = SelectedDevices();
-        var work = included.Select(device => (Device: device, Names: names.Where(name => inventories.TryGetValue(device.Id, out var files) && files.Any(file => file.Type == "file" && string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))).ToArray()))
+        var work = included.Select(device => (Device: device, Names: names.Where(name => inventories.TryGetValue(device.Id, out var files) && files.Any(file => file.Type == "file" && string.Equals(FlyingThumbClient.NormalizeRemotePath(file.Name), name, StringComparison.OrdinalIgnoreCase))).ToArray()))
             .Where(item => item.Names.Length > 0)
             .ToArray();
         var targets = work.Select(item => item.Device).ToArray();
@@ -707,23 +719,53 @@ public sealed class MainForm : Form
     async Task ChooseAndAddFiles()
     {
         using var picker = new OpenFileDialog { Multiselect = true, Title = "Choose files to add" };
-        if (picker.ShowDialog(this) == DialogResult.OK) await AddFiles(picker.FileNames);
+        if (picker.ShowDialog(this) == DialogResult.OK) await AddPaths(picker.FileNames);
     }
 
-    async Task AddFiles(string[] paths)
+    async Task ChooseAndAddFolder()
     {
-        if (busy || paths.Length == 0) return;
+        using var picker = new FolderBrowserDialog { Description = "Choose a folder to copy, including all of its contents" };
+        if (picker.ShowDialog(this) == DialogResult.OK) await AddPaths([picker.SelectedPath]);
+    }
+
+    static UploadItem[] ExpandUploadItems(IEnumerable<string> paths)
+    {
+        var items = new List<UploadItem>();
+        foreach (var path in paths)
+        {
+            if (File.Exists(path)) items.Add(new UploadItem(path, Path.GetFileName(path)));
+            else if (Directory.Exists(path))
+            {
+                var rootName = new DirectoryInfo(path).Name;
+                foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                    items.Add(new UploadItem(file, rootName + "/" + Path.GetRelativePath(path, file).Replace('\\', '/')));
+            }
+        }
+        return items.GroupBy(item => item.RemotePath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+    }
+
+    async Task AddPaths(string[] paths)
+    {
+        var items = ExpandUploadItems(paths);
+        if (items.Length == 0) { MessageBox.Show(this, "The selected folder contains no files.", "Add Folder", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        await AddFiles(items);
+    }
+
+    async Task AddFiles(UploadItem[] items)
+    {
+        if (busy || items.Length == 0) return;
         var targets = SelectedDevices();
         if (targets.Length == 0) { MessageBox.Show("Select at least one drive first."); return; }
         if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets)) return;
         if (!EnsureManagedFirmware(targets)) return;
+        if (items.Any(item => item.RemotePath.Contains('/')) && !EnsureFolderFirmware(targets)) return;
         if (!ConfirmManagedUsb(targets)) return;
 
         SetBusy(true);
         tabs.SelectedIndex = 1;
-        WriteLog($"Adding {paths.Length} file(s) to {targets.Length} selected drive(s) as one batch...");
-        var fileSizes = paths.ToDictionary(path => path, path => new FileInfo(path).Length, StringComparer.OrdinalIgnoreCase);
-        BeginTransferProgress(fileSizes.Values.Sum() * targets.Length, paths.Length * targets.Length, "Preparing transfer...");
+        WriteLog($"Adding {items.Length} file(s) to {targets.Length} selected drive(s) as one batch...");
+        var fileSizes = items.ToDictionary(item => item.LocalPath, item => new FileInfo(item.LocalPath).Length, StringComparer.OrdinalIgnoreCase);
+        BeginTransferProgress(fileSizes.Values.Sum() * targets.Length, items.Length * targets.Length, "Preparing transfer...");
         var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var failed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -744,15 +786,16 @@ public sealed class MainForm : Form
 
         await Task.WhenAll(targets.Where(d => !blocked.Contains(d.Id)).Select(async device =>
         {
-            foreach (var path in paths)
+            foreach (var item in items)
             {
-                var name = Path.GetFileName(path);
-                var operationId = $"{device.Id}:{path}";
+                var path = item.LocalPath;
+                var name = item.RemotePath;
+                var operationId = $"{device.Id}:{name}";
                 var expectedBytes = fileSizes[path];
                 SetStatus(device, $"Adding {name}...");
                 try
                 {
-                    await client.UploadAsync(device, path, Key, bytes => ReportTransferProgress(operationId, bytes, $"{name} to {device.Name}"));
+                    await client.UploadAsync(device, path, name, Key, bytes => ReportTransferProgress(operationId, bytes, $"{name} to {device.Name}"));
                     RecordUploadedFile(device, name, expectedBytes);
                     lock (gate) changed.Add(device.Id);
                     WriteLog($"{device.Name}: added {name}.");
@@ -804,7 +847,7 @@ public sealed class MainForm : Form
 
         if (errors.Count == 0)
         {
-            summary.Text = $"Added {paths.Length} file(s) to {targets.Length} drive(s)";
+            summary.Text = $"Added {items.Length} file(s) to {targets.Length} drive(s)";
             WriteLog("File batch finished successfully; USB refreshed once after all uploads.");
         }
         else
@@ -835,20 +878,21 @@ public sealed class MainForm : Form
             WriteLog("Sync could not start - " + ex.Message); summary.Text = "Sync could not read every selected drive"; SetBusy(false); return;
         }
 
-        var names = current.Values.SelectMany(files => files).Where(file => file.Type == "file").Select(file => Path.GetFileName(file.Name)).Distinct(StringComparer.OrdinalIgnoreCase);
+        var names = current.Values.SelectMany(files => files).Where(file => file.Type == "file").Select(file => FlyingThumbClient.NormalizeRemotePath(file.Name)).Distinct(StringComparer.OrdinalIgnoreCase);
         if (selectedNames is not null) names = names.Where(selectedNames.Contains);
         var namesToSync = names.ToArray();
         if (namesToSync.Length == 0)
         {
             SetBusy(false); summary.Text = selectedNames is null ? "No files found to sync" : "The selected files are no longer in the file view"; WriteLog("No matching files were found; USB mode was not changed."); return;
         }
+        if (namesToSync.Any(name => name.Contains('/')) && !EnsureFolderFirmware(targets)) { SetBusy(false); return; }
 
         var plan = new List<(string Name, (Device Device, RemoteFile File)[] Sources, Device[] Destinations)>();
         string? applyToAllDeviceId = null;
         int conflictsResolved = 0;
         foreach (var name in namesToSync)
         {
-            var present = targets.Select(device => (Device: device, File: current[device.Id].FirstOrDefault(file => string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))))
+            var present = targets.Select(device => (Device: device, File: current[device.Id].FirstOrDefault(file => string.Equals(FlyingThumbClient.NormalizeRemotePath(file.Name), name, StringComparison.OrdinalIgnoreCase))))
                 .Where(item => item.File is not null).Select(item => (Device: item.Device, File: item.File!)).ToArray();
             var sizes = present.Select(item => item.File.Size).Distinct().ToArray();
             if (sizes.Length > 1)
@@ -868,7 +912,7 @@ public sealed class MainForm : Form
                 }
                 var source = sourceMatches[0];
                 var destinations = targets.Where(device => device.Id != source.Device.Id)
-                    .Where(device => current[device.Id].FirstOrDefault(file => string.Equals(Path.GetFileName(file.Name), name, StringComparison.OrdinalIgnoreCase))?.Size != source.File.Size).ToArray();
+                    .Where(device => current[device.Id].FirstOrDefault(file => string.Equals(FlyingThumbClient.NormalizeRemotePath(file.Name), name, StringComparison.OrdinalIgnoreCase))?.Size != source.File.Size).ToArray();
                 if (destinations.Length > 0) plan.Add((name, [source], destinations));
                 conflictsResolved++;
                 WriteLog($"CONFLICT: {name} will use {source.Device.Name}'s version{(applyToAllDeviceId == source.Device.Id ? " (applied to remaining conflicts)" : "")}.");
@@ -906,7 +950,7 @@ public sealed class MainForm : Form
                 var source = availableSources[0];
                 var destinations = item.Destinations.Where(device => !blocked.Contains(device.Id)).ToArray();
                 if (destinations.Length == 0) continue;
-                var local = Path.Combine(temp, item.Name);
+                var local = Path.Combine(temp, Guid.NewGuid().ToString("N") + Path.GetExtension(item.Name));
                 var downloadId = $"download:{source.Device.Id}:{item.Name}";
                 try { await client.DownloadAsync(source.Device, item.Name, local, bytes => ReportTransferProgress(downloadId, bytes, $"Reading {item.Name} from {source.Device.Name}")); }
                 catch (Exception ex) { errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}"); continue; }
@@ -915,7 +959,7 @@ public sealed class MainForm : Form
                 {
                     var uploadId = $"upload:{destination.Id}:{item.Name}";
                     SetStatus(destination, $"Syncing {item.Name}...");
-                    try { await client.UploadAsync(destination, local, Key, bytes => ReportTransferProgress(uploadId, bytes, $"{item.Name} to {destination.Name}")); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
+                    try { await client.UploadAsync(destination, local, item.Name, Key, bytes => ReportTransferProgress(uploadId, bytes, $"{item.Name} to {destination.Name}")); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
                     catch (Exception ex) { failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {ex.Message}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}"); }
                     finally { CompleteTransferProgress(uploadId, source.File.Size, $"{item.Name} to {destination.Name}"); }
                 }

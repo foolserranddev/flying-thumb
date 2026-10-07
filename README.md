@@ -14,7 +14,7 @@ Flying Thumb Drive is a Wi-Fi-managed USB drive with removable storage. Version 
 - UDP discovery on port 4210 for reliable Windows discovery
 - Shop-key protection for uploads, deletes, renaming, and restarts
 - Batch upload support that reconnects USB only after the complete batch
-- A self-contained Windows manager for discovery, bulk upload, folder sync, and renaming
+- A self-contained Windows manager for discovery, bulk upload, full folder-tree sync, and renaming
 
 ## First installation and USB recovery
 
@@ -37,13 +37,13 @@ Firmware 2.4.12 and later favor connection range and reliability: Wi-Fi modem sl
 
 ## Flying Thumb Manager
 
-The manager is organized around everyday file work. Select drives, then drag files anywhere onto the window or choose **Add Files to Selected**. This distributes files immediately without requiring the drives to be synchronized.
+The manager is organized around everyday file work. Select drives, then drag files or complete folders anywhere onto the window. You can also choose **Add Files...** or **Add Folder...** from the File menu. Nested folders and their relative paths are preserved during upload, display, download, deletion, and synchronization across drives.
 
 Each file row has its own checkbox, and the checkbox in the column header toggles every visible file on or off. Check any set of files and **Sync...** will synchronize only that set; when nothing is checked, **Sync...** synchronizes the complete file view. The **Add files**, **Sync...**, **Refresh**, and confirmed **Delete** buttons sit together directly above the file list. Ctrl/Shift row selection remains available for right-click actions and Delete-key use.
 
 While files are being added or synchronized, the bottom status bar shows live byte progress, the current filename and destination, and the completed transfer count. Large single-file transfers therefore continue to show movement instead of only displaying a busy cursor.
 
-The **Files across all drives** view shows the additive union of filenames and creates one status/size column per discovered drive. Missing files show `—`; present files show their size. Same-name files with different sizes are marked as conflicts.
+The **Files across all drives** view shows the additive union of full relative file paths and creates one status/size column per discovered drive. Files with the same name in different folders remain distinct. Missing files show `—`; present files show their size. Same-path files with different sizes are marked as conflicts.
 
 Choose **Sync...** to keep unique files additive across the included drives. For each differing same-name file, choose which drive's copy should win; check **Apply option to all files** to reuse that drive for the remaining conflicts. Select any number of file rows and right-click **Sync selected files...** to resolve or distribute only that selection; the one-row wording remains **Sync this file...**. Synchronization never deletes files. Select one or more rows and press **Delete**, or right-click and choose **Delete**, to remove every listed copy from the included drives after confirmation.
 

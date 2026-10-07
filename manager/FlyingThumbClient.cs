@@ -11,7 +11,21 @@ public sealed class FlyingThumbClient
     readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(90) };
 
     HttpRequestMessage Request(Device d,HttpMethod method,string path,string key,HttpContent? content=null){var request=new HttpRequestMessage(method,new Uri(d.BaseUri,path)){Content=content};if(!string.IsNullOrEmpty(key))request.Headers.TryAddWithoutValidation("X-FlyingThumb-Key",key);return request;}
-    static string DemoPath(Device d,string name)=>Path.Combine(d.RootPath??throw new InvalidOperationException("Demo drive folder is unavailable."),Path.GetFileName(name));
+    public static string NormalizeRemotePath(string name)
+    {
+        var normalized = name.Replace('\\', '/').Trim();
+        while (normalized.StartsWith('/')) normalized = normalized[1..];
+        if (normalized.Length == 0 || normalized.Split('/').Any(part => part.Length == 0 || part == "." || part == ".."))
+            throw new ArgumentException("The drive path is invalid.", nameof(name));
+        return normalized;
+    }
+    static string DemoPath(Device d,string name)
+    {
+        var root = Path.GetFullPath(d.RootPath??throw new InvalidOperationException("Demo drive folder is unavailable."));
+        var path = Path.GetFullPath(Path.Combine(root, NormalizeRemotePath(name).Replace('/', Path.DirectorySeparatorChar)));
+        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("The drive path is invalid.");
+        return path;
+    }
     static void AddFilePart(MultipartFormDataContent content, HttpContent part, string fieldName, string fileName)
     {
         var safeName = Path.GetFileName(fileName).Replace("\"", "");
@@ -40,21 +54,23 @@ public sealed class FlyingThumbClient
 
     public async Task<List<RemoteFile>> ListAsync(Device d,string key)
     {
-        if(d.IsSimulated)return Directory.GetFiles(d.RootPath!).Where(path=>Path.GetFileName(path)!=DemoMarker).Select(path=>new RemoteFile{Name="/"+Path.GetFileName(path),Size=new FileInfo(path).Length,Type="file"}).ToList();
-        using var response=await http.SendAsync(Request(d,HttpMethod.Get,"api/list?dir=/",key));await EnsureSuccessAsync(response,"Read file list");return await response.Content.ReadFromJsonAsync<List<RemoteFile>>()??[];
+        if(d.IsSimulated){var root=Path.GetFullPath(d.RootPath!);return Directory.GetFiles(root,"*",SearchOption.AllDirectories).Where(path=>Path.GetFileName(path)!=DemoMarker).Select(path=>new RemoteFile{Name="/"+Path.GetRelativePath(root,path).Replace('\\','/'),Size=new FileInfo(path).Length,Type="file"}).ToList();}
+        using var response=await http.SendAsync(Request(d,HttpMethod.Get,"api/list?recursive=1",key));await EnsureSuccessAsync(response,"Read file list");return await response.Content.ReadFromJsonAsync<List<RemoteFile>>()??[];
     }
 
     public async Task DownloadAsync(Device d,string remoteName,string destinationPath,Action<long>? progress=null)
     {
-        if(d.IsSimulated){File.Copy(DemoPath(d,remoteName),destinationPath,true);progress?.Invoke(new FileInfo(destinationPath).Length);return;}
-        var path=Uri.EscapeDataString(Path.GetFileName(remoteName));using var response=await http.GetAsync(new Uri(d.BaseUri,path),HttpCompletionOption.ResponseHeadersRead);await EnsureSuccessAsync(response,$"Download {Path.GetFileName(remoteName)}");await using var input=await response.Content.ReadAsStreamAsync();await using var output=File.Create(destinationPath);
+        var remotePath=NormalizeRemotePath(remoteName);
+        if(d.IsSimulated){File.Copy(DemoPath(d,remotePath),destinationPath,true);progress?.Invoke(new FileInfo(destinationPath).Length);return;}
+        using var response=await http.SendAsync(Request(d,HttpMethod.Get,"api/download?path="+Uri.EscapeDataString("/"+remotePath),""),HttpCompletionOption.ResponseHeadersRead);await EnsureSuccessAsync(response,$"Download {remotePath}");await using var input=await response.Content.ReadAsStreamAsync();await using var output=File.Create(destinationPath);
         var buffer=new byte[81920];long copied=0;int read;while((read=await input.ReadAsync(buffer))>0){await output.WriteAsync(buffer.AsMemory(0,read));copied+=read;progress?.Invoke(copied);}
     }
 
-    public async Task UploadAsync(Device d,string filePath,string key,Action<long>? progress=null)
+    public async Task UploadAsync(Device d,string filePath,string remoteName,string key,Action<long>? progress=null)
     {
-        if(d.IsSimulated){File.Copy(filePath,DemoPath(d,filePath),true);progress?.Invoke(new FileInfo(filePath).Length);return;}
-        await using var stream=File.OpenRead(filePath);await using var progressStream=new ProgressReadStream(stream,progress);using var content=new MultipartFormDataContent();using var file=new StreamContent(progressStream);AddFilePart(content,file,"file",filePath);using var response=await http.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0",key,content));await EnsureSuccessAsync(response,$"Upload {Path.GetFileName(filePath)}");
+        var remotePath=NormalizeRemotePath(remoteName);
+        if(d.IsSimulated){var destination=DemoPath(d,remotePath);Directory.CreateDirectory(Path.GetDirectoryName(destination)!);File.Copy(filePath,destination,true);progress?.Invoke(new FileInfo(filePath).Length);return;}
+        await using var stream=File.OpenRead(filePath);await using var progressStream=new ProgressReadStream(stream,progress);using var content=new MultipartFormDataContent();using var file=new StreamContent(progressStream);AddFilePart(content,file,"file",Path.GetFileName(filePath));using var response=await http.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0&path="+Uri.EscapeDataString("/"+remotePath),key,content));await EnsureSuccessAsync(response,$"Upload {remotePath}");
     }
 
     sealed class ProgressReadStream(Stream inner,Action<long>? progress):Stream
@@ -72,10 +88,11 @@ public sealed class FlyingThumbClient
 
     public async Task DeleteAsync(Device d,string remoteName,string key)
     {
-        if(d.IsSimulated){var demoPath=DemoPath(d,remoteName);if(File.Exists(demoPath))File.Delete(demoPath);return;}
-        var encodedPath=Uri.EscapeDataString("/"+Path.GetFileName(remoteName));
+        var remotePath=NormalizeRemotePath(remoteName);
+        if(d.IsSimulated){var demoPath=DemoPath(d,remotePath);if(File.Exists(demoPath))File.Delete(demoPath);return;}
+        var encodedPath=Uri.EscapeDataString("/"+remotePath);
         using var response=await http.SendAsync(Request(d,HttpMethod.Post,"delete?dir="+encodedPath,key,new StringContent("")));
-        await EnsureSuccessAsync(response,$"Delete {Path.GetFileName(remoteName)}");
+        await EnsureSuccessAsync(response,$"Delete {remotePath}");
     }
     public async Task<bool> BeginFileBatchAsync(Device d,string key)
     {
