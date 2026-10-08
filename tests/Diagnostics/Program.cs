@@ -6,6 +6,10 @@ void Reject(Action action, string name) { try { action(); } catch (InvalidOperat
 var results = DiagnosticReport.Parse("FTDIAG|0|BOOT|v2\nFTDIAG|1|RAM|FAIL|address mismatch\nFTDIAG|2|GPIO|DATA40|PASS|HIGH=1\nFTDIAG|3|PSRAM|SKIP|not enabled\nFTDIAG|4|LED|UNVERIFIED_NO_LIGHT_SENSOR\ntruncated|PASS");
 Require(results.Count == 4 && results[0].Status == "FAIL" && results[1].Test == "GPIO / DATA40" && results[2].Status == "SKIP" && results[3].Status == "UNVERIFIED", "Result statuses must retain failures, skips and physical limits");
 Require(DiagnosticReport.AssessActive("FTDIAG|0|RAM|PASS").Any(result => result.Status == "INCOMPLETE"), "A passing fragment must never represent a full passing suite");
+DiagnosticReport.ValidateSecurity("Secure Boot: Disabled\nFlash Encryption: Disabled");
+Reject(() => DiagnosticReport.ValidateSecurity("Secure Boot: Enabled\nFlash Encryption: Disabled"), "Signed firmware requirement must prevent diagnostic replacement");
+Reject(() => DiagnosticReport.ValidateSecurity("Secure Boot: Disabled\nFlash Encryption: Enabled"), "Encrypted flash must prevent diagnostic replacement");
+Reject(() => DiagnosticReport.ValidateSecurity("Security Information:"), "Unknown security state must prevent diagnostic replacement");
 Require(DiagnosticReport.ExtractMac("MAC: 44:1B:F6:ED:92:78") == "44:1b:f6:ed:92:78", "Stable identity normalization");
 Reject(() => DiagnosticReport.ExtractMac("Chip is ESP32-S3"), "Missing identity must fail closed");
 byte[] table = new byte[4096];

@@ -4,6 +4,12 @@ public sealed record DiagnosticResult(string Test, string Status, string Evidenc
 
 public static class DiagnosticReport
 {
+    public static void ValidateSecurity(string output)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(output, @"Secure Boot:\s*Disabled", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            || !System.Text.RegularExpressions.Regex.IsMatch(output, @"Flash Encryption:\s*Disabled", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            throw new InvalidOperationException("Active diagnostics cannot replace firmware while secure boot or flash encryption is enabled, or when the security state is unknown. The read-only checks remain available.");
+    }
     public static IReadOnlyList<DiagnosticResult> AssessActive(string report)
     {
         var results = Parse(report).ToList();

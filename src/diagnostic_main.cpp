@@ -15,6 +15,8 @@
 #include "esp32-hal-alloc-ble-mem.h"
 #include "esp32-hal-tinyusb.h"
 #include "board_config.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/usb_serial_jtag_reg.h"
 
 namespace {
 CRGB diagnosticLed;
@@ -25,13 +27,21 @@ const esp_partition_t *resultPartition = nullptr;
 size_t storedBytes = 0;
 volatile bool diagnosticFinished = false;
 
+[[noreturn]] void returnToRecovery() {
+  // Reset the digital domain directly: no Serial, Wi-Fi or filesystem shutdown locks.
+  REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+  CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG, RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL | RTC_CNTL_USB_PAD_ENABLE);
+  CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PHY_SEL);
+  REG_WRITE(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_SYS_RST);
+  while (true) {}
+}
+
 void recoveryDeadline(void *) {
   const uint32_t start = millis();
   while (!diagnosticFinished && millis() - start < 120000) vTaskDelay(pdMS_TO_TICKS(100));
   if (!diagnosticFinished) {
     // A hung test still returns control to the Manager; preceding records survive.
-    usb_persist_restart(RESTART_BOOTLOADER);
-    ESP.restart();
+    returnToRecovery();
   }
   vTaskDelete(nullptr);
 }
@@ -354,8 +364,7 @@ void setup() {
   if (!saved) checkpoint("RESULT_SAVE", "FAIL");
   delay(500);
   diagnosticFinished = true;
-  usb_persist_restart(RESTART_BOOTLOADER);
-  ESP.restart();
+  returnToRecovery();
   lastButton = digitalRead(PIN_BUTTON) == LOW;
 }
 

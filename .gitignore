@@ -7,6 +7,8 @@
 
 manager/bin/
 manager/obj/
+tests/**/bin/
+tests/**/obj/
 dist/
 work/
 flash-log.txt

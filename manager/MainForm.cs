@@ -1222,18 +1222,24 @@ public sealed class MainForm : Form
         return (process.ExitCode, ((await outputTask) + (await errorTask)).Trim());
     }
 
+    string? diagnosticRecoveryPort;
     async Task<bool> WaitForRecoveryPort(string flasher, string port, TimeSpan timeout, string? expectedMac = null)
     {
+        diagnosticRecoveryPort = null;
         var until = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < until)
         {
             await Task.Delay(1500);
-            var probe = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(5), "chip_id");
+            foreach (var candidate in new[] { port }.Concat(SerialPorts()).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+            var probe = await RunFlasherCommand(flasher, candidate, "no_reset", "no_reset", TimeSpan.FromSeconds(5), "chip_id");
             if (probe.ExitCode == 0 && probe.Output.Contains("ESP32-S3", StringComparison.OrdinalIgnoreCase))
             {
                 if (expectedMac is not null && DiagnosticReport.ExtractMac(probe.Output) != expectedMac)
-                    throw new InvalidOperationException("A different device answered on the recovery port. Its flash has not been restored from this drive's backup.");
+                    continue;
+                diagnosticRecoveryPort = candidate;
                 return true;
+            }
             }
         }
         return false;
@@ -1411,6 +1417,7 @@ public sealed class MainForm : Form
             var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
             var port = await ChooseRecoveryPort(flasher, true) ?? throw new InvalidOperationException("The drive must be available in recovery mode.");
             if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10), session.Mac)) throw new InvalidOperationException("The original drive is not answering.");
+            port = diagnosticRecoveryPort ?? port;
             foreach (var item in new[] { (Offset: "0x10000", Name: "installed-app0.bin"), (Offset: "0xe000", Name: "boot-selection.bin"), (Offset: "0xff0000", Name: "original-coredump.bin") })
             {
                 summary.Text = "Restoring original drive: " + item.Name;
@@ -1482,6 +1489,11 @@ public sealed class MainForm : Form
                 report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] {test.Name}");
                 report.Add(result.Output); report.Add("");
                 if (result.ExitCode == 0) passed++;
+                if (test.Name == "Security configuration")
+                {
+                    if (result.ExitCode != 0) throw new InvalidOperationException("The security state could not be read; active diagnostics were not loaded.");
+                    DiagnosticReport.ValidateSecurity(result.Output);
+                }
             }
 
             (string Path, string Version, string Source) application;
@@ -1540,6 +1552,7 @@ public sealed class MainForm : Form
             await StartApplicationWithoutUsbReset(flasher, port);
             if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(150), expectedMac))
                 throw new TimeoutException("The active hardware test did not return to USB recovery mode within 150 seconds.");
+            port = diagnosticRecoveryPort ?? port;
 
             var resultFile = Path.Combine(Path.GetTempPath(), "FlyingThumb", "Diagnostics", Guid.NewGuid().ToString("N") + ".bin");
             Directory.CreateDirectory(Path.GetDirectoryName(resultFile)!);
@@ -1599,6 +1612,7 @@ public sealed class MainForm : Form
                     summary.Text = "Recovering normal firmware after the interrupted test...";
                     if (await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10), expectedMac))
                     {
+                        port = diagnosticRecoveryPort ?? port;
                         var restore = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3),
                             "write_flash", "0x10000", normalApplication);
                         if (restore.ExitCode == 0)
@@ -1693,6 +1707,7 @@ public sealed class MainForm : Form
     {
         const string imageName = "FlyingThumb-v2-hardware-diagnostic.bin";
         var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
+        if (File.Exists(localImage)) return (localImage, UpdateService.CurrentManagerVersion, "bundled diagnostic matched to this Manager");
         try
         {
             summary.Text = "Downloading the active hardware test...";
