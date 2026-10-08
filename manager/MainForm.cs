@@ -1230,6 +1230,60 @@ public sealed class MainForm : Form
         return promptChoices.Length == 1 ? promptChoices[0] : Prompt.Choose(prompt, "Choose USB port", promptChoices);
     }
 
+    void ShowDiagnosticReport(string conclusion, string reportText, bool allPassed)
+    {
+        using var dialog = new Form
+        {
+            Text = "Flying Thumb USB Diagnostic Report",
+            StartPosition = FormStartPosition.CenterParent,
+            MinimumSize = new Size(720, 500),
+            Size = new Size(900, 680),
+            ShowIcon = false,
+            ShowInTaskbar = false,
+            Font = Font
+        };
+        var heading = new Label
+        {
+            Text = conclusion + "\n\nUnplug and reconnect the drive normally after closing this report.",
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            MaximumSize = new Size(820, 0),
+            Padding = new Padding(4),
+            ForeColor = allPassed ? Color.FromArgb(20, 100, 45) : Color.FromArgb(170, 55, 20)
+        };
+        var reportBox = new TextBox
+        {
+            Text = reportText,
+            Multiline = true,
+            ReadOnly = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Dock = DockStyle.Fill,
+            Font = new Font("Consolas", 9.5f),
+            BackColor = Color.White
+        };
+        var copy = new Button { Text = "Copy", AutoSize = true };
+        var save = new Button { Text = "Save As...", AutoSize = true };
+        var close = new Button { Text = "Close", AutoSize = true, DialogResult = DialogResult.OK };
+        copy.Click += (_, _) => { try { Clipboard.SetText(reportText); copy.Text = "Copied"; } catch (Exception ex) { MessageBox.Show(dialog, ex.Message, "Could Not Copy", MessageBoxButtons.OK, MessageBoxIcon.Error); } };
+        save.Click += (_, _) =>
+        {
+            using var picker = new SaveFileDialog { Title = "Save Flying Thumb diagnostic report", Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*", FileName = $"FlyingThumb-diagnostic-{DateTime.Now:yyyyMMdd-HHmmss}.txt" };
+            if (picker.ShowDialog(dialog) != DialogResult.OK) return;
+            try { File.WriteAllText(picker.FileName, reportText); }
+            catch (Exception ex) { MessageBox.Show(dialog, ex.Message, "Could Not Save Report", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        };
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Padding = new Padding(0, 8, 0, 0) };
+        buttons.Controls.AddRange([close, save, copy]);
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Padding = new Padding(12) };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.Controls.Add(heading, 0, 0); layout.Controls.Add(reportBox, 0, 1); layout.Controls.Add(buttons, 0, 2);
+        dialog.Controls.Add(layout); dialog.AcceptButton = close; dialog.CancelButton = close;
+        dialog.ShowDialog(this);
+    }
+
     async void DiagnoseUsb(object? sender, EventArgs e)
     {
         var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
@@ -1282,15 +1336,11 @@ public sealed class MainForm : Form
                 if (result.ExitCode == 0) passed++;
             }
 
-            var reportFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb");
-            Directory.CreateDirectory(reportFolder);
-            var reportPath = Path.Combine(reportFolder, $"diagnostic-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
-            File.WriteAllLines(reportPath, report);
             foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
             var conclusion = passed == 4
                 ? "The processor, onboard flash, and installed firmware all passed. If normal USB and Wi-Fi are still absent after unplugging and reconnecting, this points to a startup/hardware or board-revision problem."
                 : $"{passed} of 4 diagnostic checks passed. The report contains the failing stage.";
-            MessageBox.Show(this, conclusion + $"\n\nReport saved to:\n{reportPath}\n\nUnplug and reconnect the drive normally after closing this message.", "Flying Thumb USB Diagnostic Results", MessageBoxButtons.OK, passed == 4 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 4);
             summary.Text = $"USB diagnostics finished: {passed}/4 checks passed";
         }
         catch (Exception ex)
