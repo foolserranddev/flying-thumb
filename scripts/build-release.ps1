@@ -58,7 +58,7 @@ try {
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
         firmwareScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-wifi-update.bin"; sha256 = (Get-FileHash $screenlessWifiImage -Algorithm SHA256).Hash }
         recoveryScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-full.bin"; sha256 = (Get-FileHash $screenlessFullImage -Algorithm SHA256).Hash }
-        notes = "Corrects the USB diagnostic handshake, requires positive ESP32-S3 identification, and avoids reporting dependent checks as separate hardware failures."
+        notes = "Corrects firmware diagnostics to compare only immutable application bytes, excluding writable settings and boot-selection sectors that legitimately change after startup."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

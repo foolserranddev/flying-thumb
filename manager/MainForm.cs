@@ -1333,19 +1333,19 @@ public sealed class MainForm : Form
                 if (result.ExitCode == 0) passed++;
             }
 
-            (string Path, string Version, string Source) recovery;
-            try { recovery = await ResolveRecoveryImage(screenless: true); }
+            (string Path, string Version, string Source) application;
+            try { application = await ResolveApplicationImage(screenless: true); }
             catch (Exception ex)
             {
                 report.Add("[SKIPPED] Installed firmware comparison");
-                report.Add("A verified recovery image was unavailable: " + ex.Message);
-                recovery = ("", "unknown", "unavailable");
+                report.Add("A verified application image was unavailable: " + ex.Message);
+                application = ("", "unknown", "unavailable");
             }
-            if (recovery.Path.Length > 0)
+            if (application.Path.Length > 0)
             {
-                WriteLog($"USB diagnostic: comparing installed flash with firmware {recovery.Version}...");
-                var result = await RunFlasherDiagnostic(flasher, port, "verify_flash", "0x0", recovery.Path);
-                report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] Installed firmware matches {recovery.Version}");
+                WriteLog($"USB diagnostic: comparing immutable application bytes with firmware {application.Version}...");
+                var result = await RunFlasherDiagnostic(flasher, port, "verify_flash", "0x10000", application.Path);
+                report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] Installed application matches {application.Version}");
                 report.Add(result.Output); report.Add("");
                 if (result.ExitCode == 0) passed++;
             }
@@ -1403,6 +1403,25 @@ public sealed class MainForm : Form
             var version = File.Exists(versionFile) ? File.ReadAllText(versionFile).Trim() : "unknown";
             WriteLog($"Latest recovery check unavailable; using bundled firmware {version} - {ex.Message}");
             return (localImage, version, "bundled offline image");
+        }
+    }
+
+    async Task<(string Path, string Version, string Source)> ResolveApplicationImage(bool screenless)
+    {
+        var imageName = screenless ? "FlyingThumb-v2-screenless-wifi-update.bin" : "FlyingThumb-v2-wifi-update.bin";
+        var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
+        try
+        {
+            summary.Text = "Checking for the latest diagnostic firmware image...";
+            var manifest = await UpdateService.GetLatestAsync();
+            var asset = FirmwareFor(manifest, new Device { Hardware = screenless ? "screenless-external-antenna" : "lcd" });
+            var downloaded = await UpdateService.DownloadVerifiedAsync(asset, imageName);
+            return (downloaded, asset.Version, "latest verified download");
+        }
+        catch (Exception ex)
+        {
+            if (!File.Exists(localImage)) throw new InvalidOperationException("The application firmware image could not be downloaded and no bundled copy is available.", ex);
+            return (localImage, BundledFirmwareVersion(), "bundled offline image");
         }
     }
 
