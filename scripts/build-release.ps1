@@ -12,6 +12,8 @@ Push-Location $root
 try {
     py -3 -m platformio run -e t-dongle-s3 -e t-dongle-s3-screenless -e t-dongle-s3-diagnostic
     if ($LASTEXITCODE -ne 0) { throw "Firmware build failed." }
+    py -3 -m PyInstaller --noconfirm --onefile --collect-all esptool --name FlyingThumbEsptool --distpath work\diagnostic-helper --workpath work\diagnostic-helper-build --specpath work scripts\esptool-entry.py
+    if ($LASTEXITCODE -ne 0) { throw "USB helper build failed." }
     dotnet publish manager\FlyingThumbManager.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $managerPublish
     if ($LASTEXITCODE -ne 0) { throw "Manager build failed." }
 
@@ -45,7 +47,7 @@ try {
     $firmwareVersion | Set-Content -LiteralPath "$package\firmware-version.txt" -Encoding ascii
     $firmwareVersion | Set-Content -LiteralPath "$package\firmware-screenless-version.txt" -Encoding ascii
     Copy-Item -LiteralPath "manager\assets\flying-thumb.png" -Destination "$package\assets\flying-thumb.png" -Force
-    $flasherCandidates = @("dist\manager\FlyingThumbEsptool.exe", "work\esptool\FlyingThumbEsptool.exe", "work\esptool\dist\FlyingThumbEsptool.exe")
+    $flasherCandidates = @("work\diagnostic-helper\FlyingThumbEsptool.exe", "dist\manager\FlyingThumbEsptool.exe", "work\esptool\FlyingThumbEsptool.exe", "work\esptool\dist\FlyingThumbEsptool.exe")
     $flasher = $flasherCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (!$flasher) { throw "The USB recovery helper has not been built." }
     Copy-Item -LiteralPath $flasher -Destination "$package\FlyingThumbEsptool.exe" -Force

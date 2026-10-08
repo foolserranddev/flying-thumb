@@ -37,6 +37,14 @@ Remaining integration work: PSRAM board-profile handling, fixture/manual test pr
 
 ## Completion audit (2026-10-08)
 
+### Live reset investigation
+
+The original drive (MAC 44:1b:f6:ed:92:78) briefly became reachable on COM6. Security state and the installed partition layout matched the supported profile. The original sectors touched by the temporary tester, boot selection and crash-report region were preserved under `work/live-diagnostic-recovery/session.json` with SHA-256 hashes.
+
+An RTC software reset failed to start the tester. Espressif's watchdog reset sequence did change the Windows port to COM7, confirming a different USB enumeration, but COM7 could not be opened (Windows error 31: device not functioning). A scoped PnP device restart failed with access denied. No successful diagnostic result retrieval or original-firmware restoration has been demonstrated. The temporary tester remains installed; physical recovery insertion is required before reading its report and restoring the saved session.
+
+The preview now bundles a self-contained, MAC-checked watchdog boot helper and a revised tester return path with explicit USB detach and watchdog reset. Builds pass; this new return path is not yet verified on hardware. These artifacts must remain preview-only until an actual run/report/restore cycle succeeds.
+
 Implemented source and build verification do not prove hardware operation. The Manager build passes, diagnostic firmware builds pass, and fault tests cover malformed/incomplete reports, identity extraction, layout rejection and modified backups. Internal die-temperature sensing is included. Live execution and automatic recovery/restoration remain unverified. No expanded diagnostic release has been published.
 
 COM6 is the only registered serial port and repeatedly returns no ROM data. Earlier native USB resets and 1200-baud touches also failed. A physical recovery-mode insertion, or another remotely accessible board already in ROM recovery mode, is needed to test the complete workflow. Keep the goal unfinished until that evidence exists; do not advertise the source as a complete hardware certification.

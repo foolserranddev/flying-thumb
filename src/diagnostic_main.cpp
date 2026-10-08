@@ -28,11 +28,17 @@ size_t storedBytes = 0;
 volatile bool diagnosticFinished = false;
 
 [[noreturn]] void returnToRecovery() {
-  // Reset the digital domain directly: no Serial, Wi-Fi or filesystem shutdown locks.
+  // Give the host a real detach interval, then reset the whole digital domain.
   REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+  pinMode(19, OUTPUT_OPEN_DRAIN); pinMode(20, OUTPUT_OPEN_DRAIN);
+  digitalWrite(19, LOW); digitalWrite(20, LOW);
+  delay(100);
   CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG, RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL | RTC_CNTL_USB_PAD_ENABLE);
   CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PHY_SEL);
-  REG_WRITE(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_SYS_RST);
+  REG_WRITE(RTC_CNTL_WDTWPROTECT_REG, 0x50D83AA1);
+  REG_WRITE(RTC_CNTL_WDTCONFIG1_REG, 2000);
+  REG_WRITE(RTC_CNTL_WDTCONFIG0_REG, (1u << 31) | (5u << 28) | (1u << 8) | 2u);
+  REG_WRITE(RTC_CNTL_WDTWPROTECT_REG, 0);
   while (true) {}
 }
 

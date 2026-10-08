@@ -1247,13 +1247,11 @@ public sealed class MainForm : Form
 
     async Task StartApplicationWithoutUsbReset(string flasher, string port)
     {
-        var clearForcedDownload = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(10),
-            "write_mem", "0x6000812c", "0x0", "0x1");
-        if (clearForcedDownload.ExitCode != 0) throw new InvalidOperationException("Could not release software-forced recovery mode. " + clearForcedDownload.Output);
-        // This write intentionally resets the processor before esptool can receive its reply.
-        // Unlike toggling native USB control lines, it does not relatch download mode.
-        await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(10),
-            "write_mem", "0x60008000", "0x80000000", "0xffffffff");
+        var identity = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(10), "chip_id");
+        if (identity.ExitCode != 0) throw new InvalidOperationException("Cannot identify the drive before application startup. " + identity.Output);
+        var mac = DiagnosticReport.ExtractMac(identity.Output);
+        var reset = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(15), "--flyingthumb-boot-reset", "--mac", mac);
+        if (reset.ExitCode != 0) throw new InvalidOperationException("The bundled recovery helper could not boot the application. " + reset.Output);
     }
 
     static string ReadDiagnosticResult(string path)
@@ -1525,7 +1523,10 @@ public sealed class MainForm : Form
             DiagnosticReport.ValidatePartitionLayout(File.ReadAllBytes(tablePath));
             var installedBackup = Path.Combine(backupFolder, "installed-app0.bin");
             bootSelectionBackup = Path.Combine(backupFolder, "boot-selection.bin");
-            foreach (var backup in new[] { (Offset: "0x10000", Size: "0x640000", Path: installedBackup), (Offset: "0xe000", Size: "0x2000", Path: bootSelectionBackup), (Offset: "0xff0000", Size: "0x10000", Path: Path.Combine(backupFolder, "original-coredump.bin")) })
+            // Only sectors touched by the temporary image need restoration; preserve the rest in place.
+            var touchedBytes = (new FileInfo(diagnostic.Path).Length + 4095) & ~4095L;
+            if (touchedBytes <= 0 || touchedBytes > 0x640000) throw new InvalidOperationException("The diagnostic image does not fit the installed application partition.");
+            foreach (var backup in new[] { (Offset: "0x10000", Size: "0x" + touchedBytes.ToString("x"), Path: installedBackup), (Offset: "0xe000", Size: "0x2000", Path: bootSelectionBackup), (Offset: "0xff0000", Size: "0x10000", Path: Path.Combine(backupFolder, "original-coredump.bin")) })
             {
                 var saved = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "read_flash", backup.Offset, backup.Size, backup.Path);
                 if (saved.ExitCode != 0 || !File.Exists(backup.Path)) throw new InvalidOperationException("Could not preserve installed firmware before testing. " + saved.Output);
