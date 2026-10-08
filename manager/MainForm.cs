@@ -258,6 +258,9 @@ public sealed class MainForm : Form
         drives.DropDownItems.Add(new ToolStripSeparator());
         drives.DropDownItems.Add(Item("Install / Recover a Drive via USB...", RecoverUsb));
         drives.DropDownItems.Add(Item("Diagnose a Drive via USB...", DiagnoseUsb));
+        drives.DropDownItems.Add(Item("Restore an Interrupted Diagnostic...", RestoreDiagnostic));
+        drives.DropDownItems.Add(Item("Test Selected Drive's Network File Access...", DiagnoseNetworkFiles));
+        drives.DropDownItems.Add(Item("Test Drive's Windows File Access...", DiagnoseWindowsFiles));
 
         var settings = new ToolStripMenuItem("Settings");
         settings.DropDownItems.Add(Item("Shop Management Key...", EditShopKey));
@@ -1219,20 +1222,28 @@ public sealed class MainForm : Form
         return (process.ExitCode, ((await outputTask) + (await errorTask)).Trim());
     }
 
-    async Task<bool> WaitForRecoveryPort(string flasher, string port, TimeSpan timeout)
+    async Task<bool> WaitForRecoveryPort(string flasher, string port, TimeSpan timeout, string? expectedMac = null)
     {
         var until = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < until)
         {
             await Task.Delay(1500);
             var probe = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(5), "chip_id");
-            if (probe.ExitCode == 0 && probe.Output.Contains("ESP32-S3", StringComparison.OrdinalIgnoreCase)) return true;
+            if (probe.ExitCode == 0 && probe.Output.Contains("ESP32-S3", StringComparison.OrdinalIgnoreCase))
+            {
+                if (expectedMac is not null && DiagnosticReport.ExtractMac(probe.Output) != expectedMac)
+                    throw new InvalidOperationException("A different device answered on the recovery port. Its flash has not been restored from this drive's backup.");
+                return true;
+            }
         }
         return false;
     }
 
     async Task StartApplicationWithoutUsbReset(string flasher, string port)
     {
+        var clearForcedDownload = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(10),
+            "write_mem", "0x6000812c", "0x0", "0x1");
+        if (clearForcedDownload.ExitCode != 0) throw new InvalidOperationException("Could not release software-forced recovery mode. " + clearForcedDownload.Output);
         // This write intentionally resets the processor before esptool can receive its reply.
         // Unlike toggling native USB control lines, it does not relatch download mode.
         await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(10),
@@ -1314,9 +1325,107 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.Controls.Add(heading, 0, 0); layout.Controls.Add(reportBox, 0, 1); layout.Controls.Add(buttons, 0, 2);
+        var reportTabs = new TabControl { Dock = DockStyle.Fill };
+        var checksTab = new TabPage("Test results");
+        var rawTab = new TabPage("Full report");
+        var checks = new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AutoGenerateColumns = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false, RowHeadersVisible = false, AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells };
+        checks.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
+        checks.DataSource = (reportText.Contains("|SCHEMA|", StringComparison.Ordinal) ? DiagnosticReport.AssessActive(reportText) : DiagnosticReport.Parse(reportText)).ToList();
+        checksTab.Controls.Add(checks); rawTab.Controls.Add(reportBox);
+        reportTabs.TabPages.Add(checksTab); reportTabs.TabPages.Add(rawTab);
+        layout.Controls.Add(heading, 0, 0); layout.Controls.Add(reportTabs, 0, 1); layout.Controls.Add(buttons, 0, 2);
         dialog.Controls.Add(layout); dialog.AcceptButton = close; dialog.CancelButton = close;
         dialog.ShowDialog(this);
+    }
+
+    async void DiagnoseNetworkFiles(object? sender, EventArgs e)
+    {
+        var target = devices.FirstOrDefault(d => d.Selected && !d.IsSimulated);
+        if (target is null) { MessageBox.Show(this, "Include a discovered drive first.", "Network Diagnostic"); return; }
+        if (!EnsureManagementKey([target])) return;
+        SetBusy(true);
+        var report = new List<string>();
+        var folder = Path.Combine(Path.GetTempPath(), "FlyingThumb", "NetworkDiagnostic", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var name = ".FlyingThumb-diagnostic-" + Guid.NewGuid().ToString("N") + ".bin";
+        bool uploaded = false, batch = false;
+        try
+        {
+            summary.Text = "Testing network file access...";
+            await client.ListAsync(target, managementKey); report.Add("FTDIAG|0|NETWORK_FILE_LIST|PASS");
+            var bytes = new byte[65536]; System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+            var source = Path.Combine(folder, "source.bin"); await File.WriteAllBytesAsync(source, bytes);
+            batch = await client.BeginFileBatchAsync(target, managementKey);
+            uploaded = true;
+            await client.UploadAsync(target, source, name, managementKey);
+            report.Add("FTDIAG|0|NETWORK_UPLOAD|PASS|BYTES=65536");
+            var downloaded = Path.Combine(folder, "readback.bin"); await client.DownloadAsync(target, name, downloaded);
+            var actual = await File.ReadAllBytesAsync(downloaded);
+            report.Add("FTDIAG|0|NETWORK_READBACK|" + (actual.AsSpan().SequenceEqual(bytes) ? "PASS" : "FAIL") + "|Exact byte comparison");
+        }
+        catch (Exception ex) { report.Add("FTDIAG|0|NETWORK_FILE_TEST|FAIL|" + ex.Message); }
+        finally
+        {
+            if (uploaded) try { await client.DeleteAsync(target, name, managementKey); report.Add("FTDIAG|0|NETWORK_CLEANUP|PASS"); } catch (Exception ex) { report.Add("FTDIAG|0|NETWORK_CLEANUP|FAIL|" + name + ": " + ex.Message); }
+            if (batch) try { await client.CommitFileBatchAsync(target, managementKey); } catch (Exception ex) { report.Add("FTDIAG|0|NETWORK_COMMIT|FAIL|" + ex.Message); }
+            SetBusy(false);
+            ShowDiagnosticReport("Network file test for " + target.Name, string.Join(Environment.NewLine, report), report.All(line => !line.Contains("|FAIL|")));
+            summary.Text = "Network diagnostic finished";
+        }
+    }
+
+    async void DiagnoseWindowsFiles(object? sender, EventArgs e)
+    {
+        using var picker = new FolderBrowserDialog { Description = "Select the Flying Thumb USB drive root to test Windows file access", UseDescriptionForTitle = true };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        var root = Path.GetFullPath(picker.SelectedPath);
+        if (root != Path.GetPathRoot(root)) { MessageBox.Show(this, "Select the drive root, such as E:\\.", "Windows File Diagnostic"); return; }
+        var testFolder = Path.Combine(root, ".FlyingThumb-diagnostic-" + Guid.NewGuid().ToString("N"));
+        var report = new List<string>(); SetBusy(true);
+        try
+        {
+            Directory.CreateDirectory(testFolder);
+            var path = Path.Combine(testFolder, "Nested file with spaces.bin");
+            var bytes = new byte[65536]; System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+            await File.WriteAllBytesAsync(path, bytes);
+            report.Add("FTDIAG|0|WINDOWS_WRITE|PASS|BYTES=65536");
+            var actual = await File.ReadAllBytesAsync(path);
+            report.Add("FTDIAG|0|WINDOWS_READBACK|" + (actual.AsSpan().SequenceEqual(bytes) ? "PASS" : "FAIL"));
+            var renamed = Path.Combine(testFolder, "Renamed file.bin"); File.Move(path, renamed);
+            report.Add("FTDIAG|0|WINDOWS_RENAME|PASS"); File.Delete(renamed); Directory.Delete(testFolder);
+            report.Add("FTDIAG|0|WINDOWS_CLEANUP|PASS");
+        }
+        catch (Exception ex) { report.Add("FTDIAG|0|WINDOWS_FILE_TEST|FAIL|" + ex.Message + " Temporary folder: " + testFolder); }
+        finally { SetBusy(false); ShowDiagnosticReport("Windows file access test on " + root, string.Join(Environment.NewLine, report), report.All(line => !line.Contains("|FAIL|"))); summary.Text = "Windows diagnostic finished"; }
+    }
+
+    async void RestoreDiagnostic(object? sender, EventArgs e)
+    {
+        using var picker = new OpenFileDialog { Title = "Choose the interrupted diagnostic session", Filter = "Diagnostic session|session.json", InitialDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb", "DiagnosticBackups") };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        SetBusy(true);
+        try
+        {
+            var session = DiagnosticSession.Load(picker.FileName);
+            var folder = Path.GetDirectoryName(picker.FileName)!;
+            var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
+            var port = await ChooseRecoveryPort(flasher, true) ?? throw new InvalidOperationException("The drive must be available in recovery mode.");
+            if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10), session.Mac)) throw new InvalidOperationException("The original drive is not answering.");
+            foreach (var item in new[] { (Offset: "0x10000", Name: "installed-app0.bin"), (Offset: "0xe000", Name: "boot-selection.bin"), (Offset: "0xff0000", Name: "original-coredump.bin") })
+            {
+                summary.Text = "Restoring original drive: " + item.Name;
+                var path = Path.Combine(folder, item.Name);
+                var write = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "write_flash", item.Offset, path);
+                if (write.ExitCode != 0) throw new InvalidOperationException(write.Output);
+                var verify = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "verify_flash", item.Offset, path);
+                if (verify.ExitCode != 0) throw new InvalidOperationException(verify.Output);
+            }
+            session.Phase = "Restored and verified"; session.Save(folder);
+            await StartApplicationWithoutUsbReset(flasher, port);
+            summary.Text = "Interrupted diagnostic restored and verified";
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Diagnostic Restoration", MessageBoxButtons.OK, MessageBoxIcon.Error); summary.Text = "Diagnostic restoration incomplete"; }
+        finally { SetBusy(false); }
     }
 
     async void DiagnoseUsb(object? sender, EventArgs e)
@@ -1340,6 +1449,11 @@ public sealed class MainForm : Form
         var passed = 0;
         var normalApplication = "";
         var diagnosticInstalled = false;
+        var bootSelectionBackup = "";
+        var backupFolder = "";
+        string? diagnosticError = null;
+        string? expectedMac = null;
+        DiagnosticSession? session = null;
         try
         {
             var connection = await RunFlasherDiagnostic(flasher, port, "chip_id");
@@ -1355,6 +1469,7 @@ public sealed class MainForm : Form
                 return;
             }
             passed++;
+            expectedMac = DiagnosticReport.ExtractMac(connection.Output);
 
             foreach (var test in new[]
             {
@@ -1390,6 +1505,26 @@ public sealed class MainForm : Form
                 throw new InvalidOperationException("The normal application image is unavailable, so an active test cannot safely replace and restore it.");
 
             var diagnostic = await ResolveDiagnosticImage();
+            backupFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb", "DiagnosticBackups", DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + port);
+            Directory.CreateDirectory(backupFolder);
+            var tablePath = Path.Combine(backupFolder, "partition-table.bin");
+            var tableRead = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1), "read_flash", "0x8000", "0x1000", tablePath);
+            if (tableRead.ExitCode != 0) throw new InvalidOperationException("Cannot read the installed partition table. " + tableRead.Output);
+            DiagnosticReport.ValidatePartitionLayout(File.ReadAllBytes(tablePath));
+            var installedBackup = Path.Combine(backupFolder, "installed-app0.bin");
+            bootSelectionBackup = Path.Combine(backupFolder, "boot-selection.bin");
+            foreach (var backup in new[] { (Offset: "0x10000", Size: "0x640000", Path: installedBackup), (Offset: "0xe000", Size: "0x2000", Path: bootSelectionBackup), (Offset: "0xff0000", Size: "0x10000", Path: Path.Combine(backupFolder, "original-coredump.bin")) })
+            {
+                var saved = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "read_flash", backup.Offset, backup.Size, backup.Path);
+                if (saved.ExitCode != 0 || !File.Exists(backup.Path)) throw new InvalidOperationException("Could not preserve installed firmware before testing. " + saved.Output);
+            }
+            normalApplication = installedBackup;
+            session = DiagnosticSession.Create(backupFolder, expectedMac!);
+            WriteLog("Diagnostic recovery backup: " + backupFolder);
+            diagnosticInstalled = true; // Every following mutation requires restoration, even a partial flash write.
+            session.Phase = "Testing; restoration required"; session.Save(backupFolder);
+            var clearOldResult = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1), "erase_region", "0xff0000", "0x10000");
+            if (clearOldResult.ExitCode != 0) throw new InvalidOperationException("Could not clear previous diagnostic results before starting. " + clearOldResult.Output);
             summary.Text = "Loading the active hardware test...";
             WriteLog("USB diagnostic: loading temporary active hardware test...");
             var writeDiagnostic = await RunFlasherCommand(flasher, port, "default_reset", "no_reset", TimeSpan.FromMinutes(3),
@@ -1403,8 +1538,8 @@ public sealed class MainForm : Form
             summary.Text = "Testing LED pins, Wi-Fi, microSD, and button...";
             WriteLog("USB diagnostic: running GPIO level/short, LED command, Wi-Fi, microSD, and button checks...");
             await StartApplicationWithoutUsbReset(flasher, port);
-            if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(90)))
-                throw new TimeoutException("The active hardware test did not return to USB recovery mode within 90 seconds.");
+            if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(150), expectedMac))
+                throw new TimeoutException("The active hardware test did not return to USB recovery mode within 150 seconds.");
 
             var resultFile = Path.Combine(Path.GetTempPath(), "FlyingThumb", "Diagnostics", Guid.NewGuid().ToString("N") + ".bin");
             Directory.CreateDirectory(Path.GetDirectoryName(resultFile)!);
@@ -1412,31 +1547,47 @@ public sealed class MainForm : Form
                 "read_flash", "0xff0000", "0x10000", resultFile);
             if (readResult.ExitCode != 0) throw new InvalidOperationException("The Manager could not read the active hardware-test result.\n\n" + readResult.Output);
             var activeReport = ReadDiagnosticResult(resultFile);
+            if (!activeReport.Split('\n').Any(line => line.TrimEnd().EndsWith("|SCHEMA|2", StringComparison.Ordinal)))
+                throw new InvalidOperationException("The diagnostic firmware is an older version. Install the complete current Manager package before running active tests.");
             try { File.Delete(resultFile); } catch { }
             report.Add("[ACTIVE HARDWARE TEST]");
             report.Add(activeReport);
             report.Add("");
-            var activeFailures = activeReport.Split('\n').Where(line => line.Contains("|FAIL", StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (!activeReport.Contains("|DIAGNOSTIC_COMPLETE|", StringComparison.Ordinal))
+                throw new InvalidOperationException("The hardware report is incomplete. Its last checkpoint identifies where testing stopped.");
+            var activeFailures = DiagnosticReport.AssessActive(activeReport).Where(result => result.Status is "FAIL" or "INCOMPLETE").ToArray();
             if (activeFailures.Length == 0) passed++;
 
             summary.Text = "Restoring normal Flying Thumb firmware...";
             var restore = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3),
                 "write_flash", "0x10000", normalApplication);
             if (restore.ExitCode != 0) throw new InvalidOperationException("Hardware testing finished, but normal firmware could not be restored. Run Install / Recover via USB.\n\n" + restore.Output);
+            var restoreBoot = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1), "write_flash", "0xe000", bootSelectionBackup);
+            if (restoreBoot.ExitCode != 0) throw new InvalidOperationException("Application restored, but its original boot selection could not be restored. Backup: " + bootSelectionBackup);
+            var originalCoredump = Path.Combine(backupFolder, "original-coredump.bin");
+            var restoreCoredump = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1), "write_flash", "0xff0000", originalCoredump);
+            if (restoreCoredump.ExitCode != 0) throw new InvalidOperationException("Could not restore original crash-report storage. Backup: " + originalCoredump);
+            foreach (var verify in new[] { (Offset: "0x10000", Path: normalApplication), (Offset: "0xe000", Path: bootSelectionBackup), (Offset: "0xff0000", Path: originalCoredump) })
+            {
+                var verified = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "verify_flash", verify.Offset, verify.Path);
+                if (verified.ExitCode != 0) throw new InvalidOperationException("Restored bytes did not verify at " + verify.Offset + ". Backup: " + verify.Path + "\n" + verified.Output);
+            }
             diagnosticInstalled = false;
+            session.Phase = "Restored and verified"; session.Save(backupFolder);
             await StartApplicationWithoutUsbReset(flasher, port);
 
             foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
             var conclusion = passed == 5
-                ? "All electrically observable recovery and active hardware checks passed. The report separately identifies LED light output as unverified because the board has no light sensor. Normal firmware was restored automatically."
+                ? "The completed automatic checks found no failures. Skipped and unverified checks are listed separately; this does not certify every hardware circuit. Original firmware was restored and verified."
                 : $"{passed} of 5 diagnostic groups passed. The report identifies the failing GPIO or hardware stage. Normal firmware was restored automatically.";
             ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 5);
             summary.Text = $"USB diagnostics finished: {passed}/5 groups passed";
         }
         catch (Exception ex)
         {
+            diagnosticError = ex.Message;
+            report.Add("[FAIL] Diagnostic workflow: " + ex.Message);
             WriteLog("USB diagnostics FAILED - " + ex.Message);
-            MessageBox.Show(this, "USB diagnostics could not finish.\n\n" + ex.Message, "Flying Thumb USB Diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
             summary.Text = "USB diagnostics failed";
         }
         finally
@@ -1446,16 +1597,36 @@ public sealed class MainForm : Form
                 try
                 {
                     summary.Text = "Recovering normal firmware after the interrupted test...";
-                    if (await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10)))
+                    if (await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10), expectedMac))
                     {
                         var restore = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3),
                             "write_flash", "0x10000", normalApplication);
-                        if (restore.ExitCode == 0) await StartApplicationWithoutUsbReset(flasher, port);
+                        if (restore.ExitCode == 0)
+                        {
+                            var boot = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1), "write_flash", "0xe000", bootSelectionBackup);
+                            var crash = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1), "write_flash", "0xff0000", Path.Combine(backupFolder, "original-coredump.bin"));
+                            if (boot.ExitCode == 0 && crash.ExitCode == 0)
+                            {
+                                diagnosticInstalled = false;
+                                if (session is not null) { session.Phase = "Restored after interruption"; session.Save(backupFolder); }
+                                report.Add("[PASS] Original firmware, boot selection and crash-report storage restored.");
+                                await StartApplicationWithoutUsbReset(flasher, port);
+                            }
+                            else WriteLog("RESTORATION FAILED: " + boot.Output + " Backup: " + bootSelectionBackup);
+                        }
+                        else WriteLog("RESTORATION FAILED: " + restore.Output + " Backup: " + normalApplication);
                     }
+                    else report.Add("[FAIL] Automatic restoration could not reach recovery mode. Preserve backup: " + backupFolder);
                 }
-                catch { }
+                catch (Exception restoreError) { WriteLog("RESTORATION FAILED: " + restoreError.Message + " Backup: " + normalApplication); }
             }
             SetBusy(false);
+            if (diagnosticError is not null)
+            {
+                var restoration = diagnosticInstalled ? "Automatic restoration is incomplete. Backup: " + backupFolder : "Original firmware retained or restored.";
+                ShowDiagnosticReport("Diagnostics did not finish. " + restoration, string.Join(Environment.NewLine, report), false);
+                summary.Text = "Diagnostics incomplete";
+            }
         }
     }
 
