@@ -1178,7 +1178,7 @@ public sealed class MainForm : Form
             try
             {
                 var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-                foreach (var argument in new[] { "--chip", "esp32s3", "--port", candidate, "--before", "no_reset", "--after", "no_reset", "chip_id" }) start.ArgumentList.Add(argument);
+                foreach (var argument in new[] { "--chip", "esp32s3", "--port", candidate, "--before", "default_reset", "--after", "no_reset", "chip_id" }) start.ArgumentList.Add(argument);
                 using var process = new Process { StartInfo = start };
                 process.Start();
                 var outputTask = process.StandardOutput.ReadToEndAsync();
@@ -1201,7 +1201,7 @@ public sealed class MainForm : Form
     async Task<(int ExitCode, string Output)> RunFlasherDiagnostic(string flasher, string port, params string[] command)
     {
         var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-        foreach (var argument in new[] { "--chip", "esp32s3", "--port", port, "--before", "no_reset", "--after", "no_reset" }.Concat(command)) start.ArgumentList.Add(argument);
+        foreach (var argument in new[] { "--chip", "esp32s3", "--port", port, "--before", "default_reset", "--after", "no_reset" }.Concat(command)) start.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = start };
         process.Start();
         var outputTask = process.StandardOutput.ReadToEndAsync();
@@ -1216,13 +1216,14 @@ public sealed class MainForm : Form
         return (process.ExitCode, ((await outputTask) + (await errorTask)).Trim());
     }
 
-    async Task<string?> ChooseRecoveryPort(string flasher)
+    async Task<string?> ChooseRecoveryPort(string flasher, bool requirePositiveIdentification = false)
     {
         var choices = SerialPorts();
         if (choices.Length == 0) return null;
         summary.Text = "Identifying the Flying Thumb recovery port...";
         var identified = await IdentifyEsp32RecoveryPorts(flasher, choices);
         if (identified.Length == 1) return identified[0];
+        if (identified.Length == 0 && requirePositiveIdentification) return null;
         var promptChoices = identified.Length > 1 ? identified : choices;
         var prompt = identified.Length > 1
             ? "More than one ESP32-S3 recovery device answered. Choose the Flying Thumb port."
@@ -1293,10 +1294,10 @@ public sealed class MainForm : Form
             return;
         }
         if (MessageBox.Show(this, "Unplug the Flying Thumb Drive. Hold its button while plugging it directly into this PC, keep holding until Windows detects it, then release the button and click OK.", "Flying Thumb USB Diagnostics", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
-        var port = await ChooseRecoveryPort(flasher);
+        var port = await ChooseRecoveryPort(flasher, requirePositiveIdentification: true);
         if (string.IsNullOrWhiteSpace(port))
         {
-            MessageBox.Show(this, "No ESP32-S3 recovery port was found.", "Flying Thumb USB Diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "No port positively answered as an ESP32-S3 recovery device.\n\nUnplug the Flying Thumb, hold its button before plugging it directly into this PC, keep holding for two seconds after insertion, release it, and run the diagnostic again.", "Flying Thumb Not in Recovery Mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -1305,9 +1306,22 @@ public sealed class MainForm : Form
         var passed = 0;
         try
         {
+            var connection = await RunFlasherDiagnostic(flasher, port, "chip_id");
+            report.Add($"[{(connection.ExitCode == 0 ? "PASS" : "FAIL")}] Processor connection");
+            report.Add(connection.Output); report.Add("");
+            if (connection.ExitCode != 0)
+            {
+                report.Add("[NOT RUN] Remaining checks");
+                report.Add("The Manager could not establish the initial recovery connection, so later checks would not provide independent results.");
+                foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
+                ShowDiagnosticReport("The Manager could not establish a recovery connection. No hardware or firmware conclusion can be drawn from this attempt.", string.Join(Environment.NewLine, report), false);
+                summary.Text = "USB diagnostics could not connect";
+                return;
+            }
+            passed++;
+
             foreach (var test in new[]
             {
-                (Name: "Processor connection", Command: new[] { "chip_id" }),
                 (Name: "Onboard flash", Command: new[] { "flash_id" }),
                 (Name: "Security configuration", Command: new[] { "get_security_info" })
             })
