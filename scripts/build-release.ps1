@@ -5,11 +5,12 @@ $output = Join-Path $root $OutputDirectory
 $managerPublish = Join-Path $root "work\release-manager"
 $firmwareBuild = Join-Path $root ".pio\build\t-dongle-s3"
 $screenlessBuild = Join-Path $root ".pio\build\t-dongle-s3-screenless"
+$diagnosticBuild = Join-Path $root ".pio\build\t-dongle-s3-diagnostic"
 New-Item -ItemType Directory -Force -Path $output,$managerPublish | Out-Null
 
 Push-Location $root
 try {
-    python -m platformio run -e t-dongle-s3 -e t-dongle-s3-screenless
+    py -3 -m platformio run -e t-dongle-s3 -e t-dongle-s3-screenless -e t-dongle-s3-diagnostic
     if ($LASTEXITCODE -ne 0) { throw "Firmware build failed." }
     dotnet publish manager\FlyingThumbManager.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $managerPublish
     if ($LASTEXITCODE -ne 0) { throw "Manager build failed." }
@@ -25,9 +26,11 @@ try {
     $managerExe = Join-Path $output "FlyingThumbManager.exe"
     $wifiImage = Join-Path $output "FlyingThumb-v2-wifi-update.bin"
     $screenlessWifiImage = Join-Path $output "FlyingThumb-v2-screenless-wifi-update.bin"
+    $diagnosticImage = Join-Path $output "FlyingThumb-v2-hardware-diagnostic.bin"
     Copy-Item -LiteralPath "$managerPublish\FlyingThumbManager.exe" -Destination $managerExe -Force
     Copy-Item -LiteralPath "$firmwareBuild\firmware.bin" -Destination $wifiImage -Force
     Copy-Item -LiteralPath "$screenlessBuild\firmware.bin" -Destination $screenlessWifiImage -Force
+    Copy-Item -LiteralPath "$diagnosticBuild\firmware.bin" -Destination $diagnosticImage -Force
 
     $managerVersion = ([xml](Get-Content manager\FlyingThumbManager.csproj -Raw)).Project.PropertyGroup.Version
     $firmwareVersion = [regex]::Match((Get-Content src\fileserver.cpp -Raw), 'FIRMWARE_VERSION_BASE\[\]="([^"]+)"').Groups[1].Value
@@ -38,6 +41,7 @@ try {
     Copy-Item -LiteralPath $fullImage -Destination "$package\FlyingThumb-v2-full.bin" -Force
     Copy-Item -LiteralPath $screenlessWifiImage -Destination "$package\FlyingThumb-v2-screenless-wifi-update.bin" -Force
     Copy-Item -LiteralPath $screenlessFullImage -Destination "$package\FlyingThumb-v2-screenless-full.bin" -Force
+    Copy-Item -LiteralPath $diagnosticImage -Destination "$package\FlyingThumb-v2-hardware-diagnostic.bin" -Force
     $firmwareVersion | Set-Content -LiteralPath "$package\firmware-version.txt" -Encoding ascii
     $firmwareVersion | Set-Content -LiteralPath "$package\firmware-screenless-version.txt" -Encoding ascii
     Copy-Item -LiteralPath "manager\assets\flying-thumb.png" -Destination "$package\assets\flying-thumb.png" -Force
@@ -58,7 +62,8 @@ try {
         recovery = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-full.bin"; sha256 = (Get-FileHash $fullImage -Algorithm SHA256).Hash }
         firmwareScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-wifi-update.bin"; sha256 = (Get-FileHash $screenlessWifiImage -Algorithm SHA256).Hash }
         recoveryScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-full.bin"; sha256 = (Get-FileHash $screenlessFullImage -Algorithm SHA256).Hash }
-        notes = "Corrects firmware diagnostics to compare only immutable application bytes, excluding writable settings and boot-selection sectors that legitimately change after startup."
+        diagnostic = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumb-v2-hardware-diagnostic.bin"; sha256 = (Get-FileHash $diagnosticImage -Algorithm SHA256).Hash }
+        notes = "Adds active hardware diagnostics for LED GPIO levels and shorts, Wi-Fi radio, microSD, and button state, with automatic restoration of normal firmware."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

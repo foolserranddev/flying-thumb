@@ -1199,21 +1199,55 @@ public sealed class MainForm : Form
     }
 
     async Task<(int ExitCode, string Output)> RunFlasherDiagnostic(string flasher, string port, params string[] command)
+        => await RunFlasherCommand(flasher, port, "default_reset", "no_reset", TimeSpan.FromMinutes(3), command);
+
+    async Task<(int ExitCode, string Output)> RunFlasherCommand(string flasher, string port, string before, string after, TimeSpan timeout, params string[] command)
     {
         var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-        foreach (var argument in new[] { "--chip", "esp32s3", "--port", port, "--before", "default_reset", "--after", "no_reset" }.Concat(command)) start.ArgumentList.Add(argument);
+        foreach (var argument in new[] { "--chip", "esp32s3", "--port", port, "--before", before, "--after", after }.Concat(command)) start.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = start };
         process.Start();
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         var exitTask = process.WaitForExitAsync();
-        if (await Task.WhenAny(exitTask, Task.Delay(TimeSpan.FromMinutes(3))) != exitTask)
+        if (await Task.WhenAny(exitTask, Task.Delay(timeout)) != exitTask)
         {
             process.Kill(true);
             await process.WaitForExitAsync();
             return (-1, "Diagnostic timed out.");
         }
         return (process.ExitCode, ((await outputTask) + (await errorTask)).Trim());
+    }
+
+    async Task<bool> WaitForRecoveryPort(string flasher, string port, TimeSpan timeout)
+    {
+        var until = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < until)
+        {
+            await Task.Delay(1500);
+            var probe = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(5), "chip_id");
+            if (probe.ExitCode == 0 && probe.Output.Contains("ESP32-S3", StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    async Task StartApplicationWithoutUsbReset(string flasher, string port)
+    {
+        // This write intentionally resets the processor before esptool can receive its reply.
+        // Unlike toggling native USB control lines, it does not relatch download mode.
+        await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromSeconds(10),
+            "write_mem", "0x60008000", "0x80000000", "0xffffffff");
+    }
+
+    static string ReadDiagnosticResult(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        var length = Array.FindIndex(bytes, value => value is 0 or 0xff);
+        if (length < 0) length = bytes.Length;
+        var text = System.Text.Encoding.UTF8.GetString(bytes, 0, length).Trim();
+        if (!text.StartsWith("FTDIAG|", StringComparison.Ordinal))
+            throw new InvalidOperationException("The hardware test returned to recovery mode but did not leave a recognizable result.");
+        return text;
     }
 
     async Task<string?> ChooseRecoveryPort(string flasher, bool requirePositiveIdentification = false)
@@ -1245,7 +1279,7 @@ public sealed class MainForm : Form
         };
         var heading = new Label
         {
-            Text = conclusion + "\n\nUnplug and reconnect the drive normally after closing this report.",
+            Text = conclusion,
             Dock = DockStyle.Fill,
             AutoSize = true,
             MaximumSize = new Size(820, 0),
@@ -1304,6 +1338,8 @@ public sealed class MainForm : Form
         SetBusy(true); tabs.SelectedIndex = 1; summary.Text = $"Diagnosing Flying Thumb on {port}...";
         var report = new List<string> { $"Flying Thumb USB diagnostic", $"Time: {DateTime.Now:F}", $"Recovery port: {port}", "" };
         var passed = 0;
+        var normalApplication = "";
+        var diagnosticInstalled = false;
         try
         {
             var connection = await RunFlasherDiagnostic(flasher, port, "chip_id");
@@ -1343,19 +1379,59 @@ public sealed class MainForm : Form
             }
             if (application.Path.Length > 0)
             {
+                normalApplication = application.Path;
                 WriteLog($"USB diagnostic: comparing immutable application bytes with firmware {application.Version}...");
                 var result = await RunFlasherDiagnostic(flasher, port, "verify_flash", "0x10000", application.Path);
                 report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] Installed application matches {application.Version}");
                 report.Add(result.Output); report.Add("");
                 if (result.ExitCode == 0) passed++;
             }
+            if (normalApplication.Length == 0)
+                throw new InvalidOperationException("The normal application image is unavailable, so an active test cannot safely replace and restore it.");
+
+            var diagnostic = await ResolveDiagnosticImage();
+            summary.Text = "Loading the active hardware test...";
+            WriteLog("USB diagnostic: loading temporary active hardware test...");
+            var writeDiagnostic = await RunFlasherCommand(flasher, port, "default_reset", "no_reset", TimeSpan.FromMinutes(3),
+                "write_flash", "0x10000", diagnostic.Path);
+            if (writeDiagnostic.ExitCode != 0) throw new InvalidOperationException("The temporary hardware test could not be loaded.\n\n" + writeDiagnostic.Output);
+            diagnosticInstalled = true;
+            var clearBootSelection = await RunFlasherCommand(flasher, port, "default_reset", "no_reset", TimeSpan.FromMinutes(1),
+                "erase_region", "0xe000", "0x2000");
+            if (clearBootSelection.ExitCode != 0) throw new InvalidOperationException("The hardware test could not be selected for startup.\n\n" + clearBootSelection.Output);
+
+            summary.Text = "Testing LED pins, Wi-Fi, microSD, and button...";
+            WriteLog("USB diagnostic: running GPIO level/short, LED command, Wi-Fi, microSD, and button checks...");
+            await StartApplicationWithoutUsbReset(flasher, port);
+            if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(90)))
+                throw new TimeoutException("The active hardware test did not return to USB recovery mode within 90 seconds.");
+
+            var resultFile = Path.Combine(Path.GetTempPath(), "FlyingThumb", "Diagnostics", Guid.NewGuid().ToString("N") + ".bin");
+            Directory.CreateDirectory(Path.GetDirectoryName(resultFile)!);
+            var readResult = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(1),
+                "read_flash", "0xff0000", "0x10000", resultFile);
+            if (readResult.ExitCode != 0) throw new InvalidOperationException("The Manager could not read the active hardware-test result.\n\n" + readResult.Output);
+            var activeReport = ReadDiagnosticResult(resultFile);
+            try { File.Delete(resultFile); } catch { }
+            report.Add("[ACTIVE HARDWARE TEST]");
+            report.Add(activeReport);
+            report.Add("");
+            var activeFailures = activeReport.Split('\n').Where(line => line.Contains("|FAIL", StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (activeFailures.Length == 0) passed++;
+
+            summary.Text = "Restoring normal Flying Thumb firmware...";
+            var restore = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3),
+                "write_flash", "0x10000", normalApplication);
+            if (restore.ExitCode != 0) throw new InvalidOperationException("Hardware testing finished, but normal firmware could not be restored. Run Install / Recover via USB.\n\n" + restore.Output);
+            diagnosticInstalled = false;
+            await StartApplicationWithoutUsbReset(flasher, port);
 
             foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
-            var conclusion = passed == 4
-                ? "The processor, onboard flash, and installed firmware all passed. If normal USB and Wi-Fi are still absent after unplugging and reconnecting, this points to a startup/hardware or board-revision problem."
-                : $"{passed} of 4 diagnostic checks passed. The report contains the failing stage.";
-            ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 4);
-            summary.Text = $"USB diagnostics finished: {passed}/4 checks passed";
+            var conclusion = passed == 5
+                ? "All electrically observable recovery and active hardware checks passed. The report separately identifies LED light output as unverified because the board has no light sensor. Normal firmware was restored automatically."
+                : $"{passed} of 5 diagnostic groups passed. The report identifies the failing GPIO or hardware stage. Normal firmware was restored automatically.";
+            ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 5);
+            summary.Text = $"USB diagnostics finished: {passed}/5 groups passed";
         }
         catch (Exception ex)
         {
@@ -1363,7 +1439,24 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "USB diagnostics could not finish.\n\n" + ex.Message, "Flying Thumb USB Diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
             summary.Text = "USB diagnostics failed";
         }
-        finally { SetBusy(false); }
+        finally
+        {
+            if (diagnosticInstalled && normalApplication.Length > 0)
+            {
+                try
+                {
+                    summary.Text = "Recovering normal firmware after the interrupted test...";
+                    if (await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10)))
+                    {
+                        var restore = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3),
+                            "write_flash", "0x10000", normalApplication);
+                        if (restore.ExitCode == 0) await StartApplicationWithoutUsbReset(flasher, port);
+                    }
+                }
+                catch { }
+            }
+            SetBusy(false);
+        }
     }
 
     static string BundledFirmwareVersion()
@@ -1422,6 +1515,24 @@ public sealed class MainForm : Form
         {
             if (!File.Exists(localImage)) throw new InvalidOperationException("The application firmware image could not be downloaded and no bundled copy is available.", ex);
             return (localImage, BundledFirmwareVersion(), "bundled offline image");
+        }
+    }
+
+    async Task<(string Path, string Version, string Source)> ResolveDiagnosticImage()
+    {
+        const string imageName = "FlyingThumb-v2-hardware-diagnostic.bin";
+        var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
+        try
+        {
+            summary.Text = "Downloading the active hardware test...";
+            var manifest = await UpdateService.GetLatestAsync();
+            var downloaded = await UpdateService.DownloadVerifiedAsync(manifest.Diagnostic, imageName);
+            return (downloaded, manifest.Diagnostic.Version, "latest verified download");
+        }
+        catch (Exception ex)
+        {
+            if (!File.Exists(localImage)) throw new InvalidOperationException("The active hardware test could not be downloaded and no bundled copy is available.", ex);
+            return (localImage, UpdateService.CurrentManagerVersion, "bundled offline image");
         }
     }
 

@@ -33,6 +33,7 @@ try {
         "$AssetDirectory/FlyingThumb-v2-full.bin",
         "$AssetDirectory/FlyingThumb-v2-screenless-wifi-update.bin",
         "$AssetDirectory/FlyingThumb-v2-screenless-full.bin",
+        "$AssetDirectory/FlyingThumb-v2-hardware-diagnostic.bin",
         "$AssetDirectory/latest.json"
     )
 
