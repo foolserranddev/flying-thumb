@@ -27,7 +27,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.5.0";
+constexpr char FIRMWARE_VERSION_BASE[]="2.5.1";
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
@@ -45,11 +45,7 @@ String uploadName(String n){int extended=n.indexOf("filename*=");if(extended>=0)
 bool authorized(){return !managementKey.length()||(server.hasHeader("X-FlyingThumb-Key")&&server.header("X-FlyingThumb-Key")==managementKey);}
 bool storageReady(){return SD_MMC.cardType()!=CARD_NONE&&SD_MMC.totalBytes()>0;}
 String firmwareVersion(){const esp_partition_t*p=esp_ota_get_running_partition();String suffix="-?";if(p){String label=p->label;if(label=="app0")suffix="-A";else if(label=="app1")suffix="-B";}return String(FIRMWARE_VERSION_BASE)+suffix;}
-#ifdef FLYING_THUMB_NO_DISPLAY
-constexpr char HARDWARE_PROFILE[]="screenless-external-antenna";
-#else
-constexpr char HARDWARE_PROFILE[]="lcd";
-#endif
+constexpr char HARDWARE_PROFILE[]="flyingthumb";
 void logMemory(const char* stage){Serial.printf("%s: firmware=%s heap=%u largest-internal=%u psram=%u free-psram=%u\n",stage,firmwareVersion().c_str(),ESP.getFreeHeap(),heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),ESP.getPsramSize(),ESP.getFreePsram());}
 bool requireAuth(){if(authorized())return true;server.send(401,"application/json","{\"error\":\"invalid management key\"}");return false;}
 void saveNetwork(const String&s,const String&p){prefs.begin("network",false);prefs.putString("ssid",s);prefs.putString("password",p);prefs.end();}

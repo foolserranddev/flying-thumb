@@ -992,8 +992,8 @@ public sealed class MainForm : Form
         return failed == 0;
     }
 
-    static UpdateAsset FirmwareFor(UpdateManifest manifest, Device device) => device.IsScreenless ? manifest.FirmwareScreenless : manifest.Firmware;
-    static UpdateAsset RecoveryFor(UpdateManifest manifest, bool screenless) => screenless ? manifest.RecoveryScreenless : manifest.Recovery;
+    static UpdateAsset FirmwareFor(UpdateManifest manifest, Device device) => manifest.Firmware;
+    static UpdateAsset RecoveryFor(UpdateManifest manifest, bool screenless) => manifest.Recovery;
     Device[] DrivesNeedingUpdate(UpdateManifest manifest) => devices.Where(d =>
     {
         if (d.IsSimulated) return false;
@@ -1077,7 +1077,7 @@ public sealed class MainForm : Form
             {
                 summary.Text = "Downloading drive update...";
                 var firmwarePaths = new Dictionary<bool, string>();
-                foreach (var screenless in outdatedDrives.Select(d => d.IsScreenless).Distinct())
+                foreach (var screenless in new[] { false })
                 {
                     var firmwareAsset = screenless ? manifest.FirmwareScreenless : manifest.Firmware;
                     var firmwareName = screenless ? "FlyingThumb-v2-screenless-wifi-update.bin" : "FlyingThumb-v2-wifi-update.bin";
@@ -1101,7 +1101,7 @@ public sealed class MainForm : Form
                     try
                     {
                         SetStatus(device, "Installing update...");
-                        await client.UpgradeFirmwareAsync(device, firmwarePaths[device.IsScreenless], Key);
+                        await client.UpgradeFirmwareAsync(device, firmwarePaths[false], Key);
                         lock (successfulDrives) successfulDrives.Add(device);
                         WriteLog($"{device.Name}: update installed; reconnecting.");
                     }
@@ -1657,14 +1657,16 @@ public sealed class MainForm : Form
 
     async Task<(string Path, string Version, string Source)> ResolveRecoveryImage(bool screenless)
     {
-        var imageName = screenless ? "FlyingThumb-v2-screenless-full.bin" : "FlyingThumb-v2-full.bin";
-        var versionName = screenless ? "firmware-screenless-version.txt" : "firmware-version.txt";
+        const string imageName = "FlyingThumb-v2-full.bin";
+        const string versionName = "firmware-version.txt";
         var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
         try
         {
             summary.Text = "Checking for the latest recovery firmware...";
             var manifest = await UpdateService.GetLatestAsync();
             var asset = RecoveryFor(manifest, screenless);
+            if (File.Exists(localImage) && UpdateService.IsNewer(BundledFirmwareVersion(), asset.Version))
+                return (localImage, BundledFirmwareVersion(), "newer bundled image");
             var downloaded = await UpdateService.DownloadVerifiedAsync(asset, imageName);
             WriteLog($"Downloaded and verified USB recovery firmware {asset.Version}.");
             try
@@ -1687,13 +1689,15 @@ public sealed class MainForm : Form
 
     async Task<(string Path, string Version, string Source)> ResolveApplicationImage(bool screenless)
     {
-        var imageName = screenless ? "FlyingThumb-v2-screenless-wifi-update.bin" : "FlyingThumb-v2-wifi-update.bin";
+        const string imageName = "FlyingThumb-v2-wifi-update.bin";
         var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
         try
         {
             summary.Text = "Checking for the latest diagnostic firmware image...";
             var manifest = await UpdateService.GetLatestAsync();
             var asset = FirmwareFor(manifest, new Device { Hardware = screenless ? "screenless-external-antenna" : "lcd" });
+            if (File.Exists(localImage) && UpdateService.IsNewer(BundledFirmwareVersion(), asset.Version))
+                return (localImage, BundledFirmwareVersion(), "newer bundled image");
             var downloaded = await UpdateService.DownloadVerifiedAsync(asset, imageName);
             return (downloaded, asset.Version, "latest verified download");
         }

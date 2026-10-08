@@ -17,3 +17,4 @@ void setActivityLed(bool reading, bool writing);
 bool wakeDisplay();
 void handleDisplayPower();
 void handleStatusLed();
+void showDiagnosticLed(unsigned char red, unsigned char green, unsigned char blue);

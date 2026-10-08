@@ -31,6 +31,8 @@ Use this same path to recover a dongle locally if a wireless firmware upgrade is
 
 After restarting, the setup hotspot turns off. The drive reports status through its color LED: slow blue blinking while connecting (one second on and one second off), fast blue blinking during WPS, solid red when saved Wi-Fi cannot be reached, blinking red for a fault, solid green when connected, and blinking green while its setup hotspot is active.
 
+All drives use the same firmware with both LED status and optional LCD output. A connected display shows status and sleeps after three minutes. LCD initialization failures are nonfatal. The write-only display wiring cannot positively detect an absent screen; display commands are harmless on drives without one. No screen/no-screen selection is needed in the Manager.
+
 A short button press starts a two-minute WPS window directly in the running firmware. USB storage remains connected throughout pairing; starting WPS does not reboot the drive or reconnect its USB interfaces. Holding the button for five seconds erases the stored Wi-Fi network and returns the drive to setup mode. The drive name and management key are retained.
 
 Firmware 2.4.12 and later favor connection range and reliability: Wi-Fi modem sleep is disabled and the radio requests the maximum permitted transmit power before attempting to connect, during WPS, and in setup access-point mode.
@@ -60,8 +62,8 @@ Run **`scripts/create-demo-drives.ps1`** to create a local `demo-drives` folder 
 The sample set includes shared files, machine-specific files, missing-file cases, and a deliberate `Shared Shop Notes.txt` conflict. The generated folder is intentionally excluded from Git so real test files are never published accidentally. Delete the single `demo-drives` folder to remove and disable every simulated drive; no source or configuration change is required.
 ## Firmware files
 
-- `release/FlyingThumb-v2-screenless-full.bin` is the complete current-hardware image for flashing at address `0x0`.
-- `release/FlyingThumb-v2-screenless-wifi-update.bin` is the current-hardware wireless update image.
+- `release/FlyingThumb-v2-screenless-full.bin` is a compatibility filename for the same complete firmware image.
+- `release/FlyingThumb-v2-screenless-wifi-update.bin` is a compatibility filename for the same wireless update image.
 
 To build or upload through PlatformIO:
 
@@ -69,7 +71,7 @@ To build or upload through PlatformIO:
 py -3 -m platformio run
 py -3 -m platformio run --target upload
 # Build the current hardware explicitly:
-py -3 -m platformio run -e t-dongle-s3-screenless
+py -3 -m platformio run -e t-dongle-s3
 ```
 
 To rebuild the manager:

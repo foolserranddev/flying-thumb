@@ -83,24 +83,37 @@ void initDisplay() {
   showLed(CRGB::Black);
 #ifndef FLYING_THUMB_NO_DISPLAY
   frame = static_cast<uint16_t *>(heap_caps_malloc(LCD_W * LCD_H * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!frame) abort();
+  if (!frame) { Serial.println("Optional LCD: no framebuffer memory; continuing with LED"); return; }
   pinMode(PIN_TFT_BL, OUTPUT); digitalWrite(PIN_TFT_BL, HIGH);
+  bool busReady = false;
+  auto optionalLcd = [&](esp_err_t result) {
+    if (result == ESP_OK) return true;
+    Serial.printf("Optional LCD unavailable: %s; continuing with LED\n", esp_err_to_name(result));
+    if (panel) { esp_lcd_panel_del(panel); panel = nullptr; }
+    if (panelIo) { esp_lcd_panel_io_del(panelIo); panelIo = nullptr; }
+    if (busReady) spi_bus_free(LCD_HOST);
+    heap_caps_free(frame); frame = nullptr;
+    displayAwake = false;
+    digitalWrite(PIN_TFT_BL, HIGH);
+    return false;
+  };
   spi_bus_config_t bus = ST7735_PANEL_BUS_SPI_CONFIG(PIN_TFT_SCLK, PIN_TFT_MOSI, LCD_W * LCD_H * sizeof(uint16_t));
-  ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO));
+  if (!optionalLcd(spi_bus_initialize(LCD_HOST, &bus, SPI_DMA_CH_AUTO))) return;
+  busReady = true;
   esp_lcd_panel_io_spi_config_t io = ST7735_PANEL_IO_SPI_CONFIG(PIN_TFT_CS, PIN_TFT_DC, nullptr, nullptr);
-  ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io, &panelIo));
+  if (!optionalLcd(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_HOST, &io, &panelIo))) return;
   esp_lcd_panel_dev_config_t config = {};
   config.reset_gpio_num = PIN_TFT_RST;
   config.color_space = static_cast<decltype(config.color_space)>(ESP_LCD_COLOR_SPACE_BGR);
   config.bits_per_pixel = 16;
-  ESP_ERROR_CHECK(esp_lcd_new_panel_st7735(panelIo, &config, &panel));
-  ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
-  ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
-  ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, true));
-  ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel, 1, 26));
-  ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel, true));
-  ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, false, true));
-  ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
+  if (!optionalLcd(esp_lcd_new_panel_st7735(panelIo, &config, &panel))) return;
+  if (!optionalLcd(esp_lcd_panel_reset(panel))) return;
+  if (!optionalLcd(esp_lcd_panel_init(panel))) return;
+  if (!optionalLcd(esp_lcd_panel_invert_color(panel, true))) return;
+  if (!optionalLcd(esp_lcd_panel_set_gap(panel, 1, 26))) return;
+  if (!optionalLcd(esp_lcd_panel_swap_xy(panel, true))) return;
+  if (!optionalLcd(esp_lcd_panel_mirror(panel, false, true))) return;
+  if (!optionalLcd(esp_lcd_panel_disp_on_off(panel, true))) return;
   digitalWrite(PIN_TFT_BL, LOW);
   clear(0x07FF); present(); delay(350);
   displayAwake = true; displayTouchedAt = millis();
@@ -110,6 +123,7 @@ void initDisplay() {
 
 void displayMessage(const char *title, const char *line1, const char *line2) {
 #ifndef FLYING_THUMB_NO_DISPLAY
+  if (!panel || !frame) return;
   wakeDisplay();
   clear(0x0000);
   int titleScale = title && strlen(title) <= 13 ? 2 : 1;
@@ -124,6 +138,7 @@ void displayMessage(const char *title, const char *line1, const char *line2) {
 
 bool wakeDisplay() {
 #ifndef FLYING_THUMB_NO_DISPLAY
+  if (!panel || !frame) return false;
   const bool wasOff = !displayAwake;
   displayTouchedAt = millis();
   if (wasOff) {
@@ -151,8 +166,12 @@ void setDeviceStatus(DeviceStatus status) {
   deviceStatus = status;
 }
 
+void showDiagnosticLed(unsigned char red, unsigned char green, unsigned char blue) {
+  showLed(CRGB(red, green, blue));
+  lastLedValue = 0xffffffff;
+}
+
 void handleStatusLed() {
-#ifdef FLYING_THUMB_NO_DISPLAY
   const uint32_t now = millis();
   CRGB color = CRGB::Black;
   bool on = true;
@@ -171,14 +190,9 @@ void handleStatusLed() {
   if (value == lastLedValue) return;
   lastLedValue = value;
   showLed(output);
-#endif
 }
 
 void setActivityLed(bool reading, bool writing) {
-#ifndef FLYING_THUMB_NO_DISPLAY
-  static uint8_t old = 0xff; uint8_t state = (reading ? 1 : 0) | (writing ? 2 : 0); if (state == old) return; old = state;
-  led = writing ? (reading ? CRGB::Yellow : CRGB::Red) : (reading ? CRGB::Green : CRGB::Blue); FastLED.show();
-#else
+  // Wi-Fi/fault status owns the LED on every drive, independently of LCD output.
   (void)reading; (void)writing;
-#endif
 }

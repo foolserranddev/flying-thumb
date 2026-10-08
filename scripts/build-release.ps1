@@ -10,7 +10,7 @@ New-Item -ItemType Directory -Force -Path $output,$managerPublish | Out-Null
 
 Push-Location $root
 try {
-    py -3 -m platformio run -e t-dongle-s3 -e t-dongle-s3-screenless -e t-dongle-s3-diagnostic
+    py -3 -m platformio run -e t-dongle-s3 -e t-dongle-s3-diagnostic
     if ($LASTEXITCODE -ne 0) { throw "Firmware build failed." }
     py -3 -m PyInstaller --noconfirm --onefile --collect-all esptool --name FlyingThumbEsptool --distpath work\diagnostic-helper --workpath work\diagnostic-helper-build --specpath work scripts\esptool-entry.py
     if ($LASTEXITCODE -ne 0) { throw "USB helper build failed." }
@@ -22,8 +22,7 @@ try {
     $screenlessFullImage = Join-Path $output "FlyingThumb-v2-screenless-full.bin"
     python -m esptool --chip esp32s3 merge_bin -o $fullImage 0x0 "$firmwareBuild\bootloader.bin" 0x8000 "$firmwareBuild\partitions.bin" 0xe000 $bootApp 0x10000 "$firmwareBuild\firmware.bin"
     if ($LASTEXITCODE -ne 0) { throw "Recovery image packaging failed." }
-    python -m esptool --chip esp32s3 merge_bin -o $screenlessFullImage 0x0 "$screenlessBuild\bootloader.bin" 0x8000 "$screenlessBuild\partitions.bin" 0xe000 $bootApp 0x10000 "$screenlessBuild\firmware.bin"
-    if ($LASTEXITCODE -ne 0) { throw "Screenless recovery image packaging failed." }
+    Copy-Item -LiteralPath $fullImage -Destination $screenlessFullImage -Force
 
     $managerExe = Join-Path $output "FlyingThumbManager.exe"
     $wifiImage = Join-Path $output "FlyingThumb-v2-wifi-update.bin"
@@ -31,7 +30,7 @@ try {
     $diagnosticImage = Join-Path $output "FlyingThumb-v2-hardware-diagnostic.bin"
     Copy-Item -LiteralPath "$managerPublish\FlyingThumbManager.exe" -Destination $managerExe -Force
     Copy-Item -LiteralPath "$firmwareBuild\firmware.bin" -Destination $wifiImage -Force
-    Copy-Item -LiteralPath "$screenlessBuild\firmware.bin" -Destination $screenlessWifiImage -Force
+    Copy-Item -LiteralPath "$firmwareBuild\firmware.bin" -Destination $screenlessWifiImage -Force
     Copy-Item -LiteralPath "$diagnosticBuild\firmware.bin" -Destination $diagnosticImage -Force
 
     $managerVersion = ([xml](Get-Content manager\FlyingThumbManager.csproj -Raw)).Project.PropertyGroup.Version

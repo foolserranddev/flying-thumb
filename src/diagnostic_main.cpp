@@ -15,11 +15,11 @@
 #include "esp32-hal-alloc-ble-mem.h"
 #include "esp32-hal-tinyusb.h"
 #include "board_config.h"
+#include "display.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/usb_serial_jtag_reg.h"
 
 namespace {
-CRGB diagnosticLed;
 uint32_t lastHeartbeat = 0;
 bool lastButton = false;
 String report;
@@ -72,8 +72,7 @@ void checkpoint(const char *name, const char *result = nullptr) {
 
 void showColor(const char *name, const CRGB &color) {
   checkpoint("LED_COMMAND", name);
-  diagnosticLed = color;
-  FastLED.show();
+  showDiagnosticLed(color.r, color.g, color.b);
   delay(600);
   checkpoint("LED_COMMAND_COMPLETE", name);
 }
@@ -155,7 +154,7 @@ void testSystem() {
   checkpoint("ANTENNA", "UNVERIFIED|RSSI and received networks provide indirect evidence only");
   checkpoint("USB_STORAGE_HOST", "UNVERIFIED|Recovery transport works; printer/Windows enumeration requires host-side test");
   checkpoint("UNCONNECTED_GPIO", "SKIP|Unknown wiring; USB, flash, PSRAM and strap pins must not be blindly driven");
-  checkpoint("LCD", "SKIP|Screenless hardware profile");
+  checkpoint("LCD", "UNVERIFIED|Optional write-only panel; visual confirmation required");
   checkpoint("BUTTON_ACTUATION", "UNVERIFIED|Physical press required to prove switch and trace continuity");
 }
 
@@ -313,8 +312,8 @@ void setup() {
   checkpoint("GPIO_TEST_COMPLETE");
 
   checkpoint("LED_INIT_BEGIN", "APA102 data=40 clock=39");
-  FastLED.addLeds<APA102, PIN_LED_DATA, PIN_LED_CLOCK, BGR>(&diagnosticLed, 1);
-  FastLED.setBrightness(32);
+  initDisplay();
+  displayMessage("DIAGNOSTICS", "Testing hardware", "Report over USB");
   checkpoint("LED_INIT_COMPLETE", "PASS");
   showColor("RED", CRGB::Red);
   showColor("GREEN", CRGB::Green);
