@@ -13,11 +13,21 @@ public static class DiagnosticReport
     public static IReadOnlyList<DiagnosticResult> AssessActive(string report)
     {
         var results = Parse(report).ToList();
-        var required = new[] { "CHIP", "HEAP_BEFORE", "INTERNAL_RAM", "PSRAM", "TIMER", "RNG", "CPU_CORE0", "CPU_CORE1", "SHA256_KNOWN_VECTOR", "BLE_CONTROLLER", "WIFI_SCAN", "WIFI_SAVED_CONNECTION", "WIFI_AP", "SD_INIT", "SD_ONE_BIT", "HEAP_AFTER" };
+        var required = new[] { "CHIP", "HEAP_BEFORE", "INTERNAL_RAM", "PSRAM", "TIMER", "RNG", "DIE_TEMPERATURE", "CPU_CORE0", "CPU_CORE1", "SHA256_KNOWN_VECTOR", "FLASH_SCRATCH", "BLE_CONTROLLER", "GPIO_LEVELS / LED_DATA_GPIO40", "GPIO_LEVELS / LED_CLOCK_GPIO39", "GPIO_CROSS_SHORT / DATA40_TO_CLOCK39", "GPIO_CROSS_SHORT / CLOCK39_TO_DATA40", "LED_INIT_COMPLETE", "WIFI_SCAN", "WIFI_SAVED_CONNECTION", "WIFI_AP", "SD_INIT", "SD_ONE_BIT", "HEAP_AFTER" };
         foreach (var name in required)
             if (!results.Any(result => result.Test == name)) results.Add(new(name, "INCOMPLETE", "No result was returned for this required stage."));
         if (!report.Split('\n').Any(line => line.TrimEnd().EndsWith("|SCHEMA|2", StringComparison.Ordinal))) results.Add(new("REPORT_SCHEMA", "INCOMPLETE", "Expected schema 2."));
         if (!report.Contains("|DIAGNOSTIC_COMPLETE|", StringComparison.Ordinal)) results.Add(new("EXECUTION", "INCOMPLETE", "Completion marker missing; last checkpoint may locate the stopped test."));
+        if (!report.Split('\n').Any(line => line.TrimEnd().EndsWith("|TRANSPORT|HWCDC_V1", StringComparison.Ordinal))) results.Add(new("TRANSPORT", "INCOMPLETE", "Current hardware-serial transport marker missing."));
+        if (!results.Any(result => result.Test == "NVS" && result.Status is "FAIL" or "SKIP"))
+            foreach (var name in new[] { "NVS_PERSISTENCE", "NVS_CLEANUP" })
+                if (!results.Any(result => result.Test == name)) results.Add(new(name, "INCOMPLETE", "Settings storage check did not return a result."));
+        foreach (var color in new[] { "RED", "GREEN", "BLUE", "WHITE", "OFF" })
+            if (!report.Split('\n').Any(line => line.TrimEnd().EndsWith("|LED_COMMAND_COMPLETE|" + color, StringComparison.Ordinal)))
+                results.Add(new("LED_COLOR / " + color, "INCOMPLETE", "Color command completion missing; visible light still requires observation."));
+        if (results.Any(result => result.Test == "SD_INIT" && result.Status == "PASS"))
+            foreach (var name in new[] { "SD_FAT_GEOMETRY", "SD_SECTOR0", "SD_RAW_SAMPLES", "SD_FILE_ROUNDTRIP", "SD_RENAME", "SD_CLEANUP" })
+                if (!results.Any(result => result.Test == name)) results.Add(new(name, "INCOMPLETE", "Mounted-card check did not return a result."));
         return results;
     }
     public static string ExtractMac(string output)

@@ -18,6 +18,7 @@
 #include "display.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/usb_serial_jtag_reg.h"
+static_assert(ARDUINO_USB_MODE == 1, "Diagnostics require hardware CDC/JTAG transport");
 
 namespace {
 uint32_t lastHeartbeat = 0;
@@ -28,17 +29,10 @@ size_t storedBytes = 0;
 volatile bool diagnosticFinished = false;
 
 [[noreturn]] void returnToRecovery() {
-  // Give the host a real detach interval, then reset the whole digital domain.
+  // Diagnostics use hardware USB CDC/JTAG, the same peripheral as ROM recovery.
+  // Preserve the USB transport; no TinyUSB PHY handoff or GPIO detach is needed.
   REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
-  pinMode(19, OUTPUT_OPEN_DRAIN); pinMode(20, OUTPUT_OPEN_DRAIN);
-  digitalWrite(19, LOW); digitalWrite(20, LOW);
-  delay(100);
-  CLEAR_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG, RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL | RTC_CNTL_USB_PAD_ENABLE);
-  CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_PHY_SEL);
-  REG_WRITE(RTC_CNTL_WDTWPROTECT_REG, 0x50D83AA1);
-  REG_WRITE(RTC_CNTL_WDTCONFIG1_REG, 2000);
-  REG_WRITE(RTC_CNTL_WDTCONFIG0_REG, (1u << 31) | (5u << 28) | (1u << 8) | 2u);
-  REG_WRITE(RTC_CNTL_WDTWPROTECT_REG, 0);
+  REG_WRITE(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_SW_SYS_RST);
   while (true) {}
 }
 
@@ -193,6 +187,9 @@ void testSettingsAndFlash() {
   ok &= prefs.getBytes("probe", readback, sizeof(readback)) == sizeof(readback) && memcmp(pattern, readback, sizeof(pattern)) == 0;
   checkpoint("NVS_PERSISTENCE", ok ? "PASS|Write close reopen read" : "FAIL");
   checkpoint("NVS_CLEANUP", prefs.remove("probe") ? "PASS" : "FAIL"); prefs.end();
+}
+
+void testScratchFlash() {
   const esp_partition_t *scratch = resultPartition;
   if (!scratch || scratch->size < 65536) { checkpoint("FLASH_SCRATCH", "SKIP|No validated reserved region"); return; }
   uint8_t data[256], verify[256]; for (size_t i = 0; i < sizeof(data); ++i) data[i] = i ^ 0xa5;
@@ -236,7 +233,7 @@ uint32_t le32(const uint8_t *p) { return le16(p) | uint32_t(le16(p + 2)) << 16; 
 void testCardGeometry() {
   uint8_t sector[512];
   if (SD_MMC.sectorSize() != 512 || !SD_MMC.readRAW(sector, 0)) { checkpoint("SD_GEOMETRY", "FAIL|Cannot read sector zero"); return; }
-  const uint32_t capacity = SD_MMC.numSectors();
+  const uint32_t capacity = SD_MMC.cardSize() / SD_MMC.sectorSize();
   uint32_t start = 0, available = capacity;
   const bool looksLikeBoot = (sector[0] == 0xeb || sector[0] == 0xe9) && le16(sector + 11) == 512;
   if (!looksLikeBoot) {
@@ -293,10 +290,12 @@ void setup() {
   xTaskCreate(recoveryDeadline, "diagnostic-deadline", 4096, nullptr, 2, nullptr);
   checkpoint("BOOT", "Flying Thumb active hardware diagnostic v2");
   checkpoint("SCHEMA", "2");
+  checkpoint("TRANSPORT", "HWCDC_V1");
   appendReport("FTDIAG|" + String(millis()) + "|RESET_REASON|" + String(static_cast<int>(esp_reset_reason())));
   testSystem();
   testCoresAndCrypto();
   testSettingsAndFlash();
+  testScratchFlash();
   checkpoint("BLE_CONTROLLER", btStartMode(BT_MODE_BLE) && btStarted() ? "PASS|Controller initialized" : "FAIL|Controller initialization failed");
   btStop();
   checkpoint("BLE_RADIO", "UNVERIFIED|Over-the-air receive/transmit requires a BLE peer");
@@ -350,7 +349,7 @@ void setup() {
     uint8_t sector[512];
     const bool raw = SD_MMC.sectorSize() == 512 && SD_MMC.readRAW(sector, 0);
     checkpoint("SD_SECTOR0", raw && sector[510] == 0x55 && sector[511] == 0xaa ? "PASS|MBR or FAT boot signature readable" : "FAIL|Sector unreadable or boot signature absent");
-    const uint32_t sectors = SD_MMC.numSectors();
+    const uint32_t sectors = SD_MMC.cardSize() / SD_MMC.sectorSize();
     bool sampleOk = sectors > 0;
     const uint32_t positions[] = {0, sectors / 4, sectors / 2, sectors ? sectors - 1 : 0};
     for (uint32_t position : positions) {

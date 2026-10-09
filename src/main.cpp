@@ -23,7 +23,7 @@ BYTE rawDrive = FF_DRV_NOT_USED;
 
 void locateRawDrive() {
   rawDrive = FF_DRV_NOT_USED;
-  const LBA_t expectedSectors = SD_MMC.numSectors();
+  const LBA_t expectedSectors = SD_MMC.cardSize() / SD_MMC.sectorSize();
   for (BYTE drive = 0; drive < FF_VOLUMES; ++drive) {
     if (disk_status(drive) & (STA_NOINIT | STA_NODISK)) continue;
     LBA_t sectors = 0;
@@ -104,7 +104,7 @@ void startUsbDisk() {
   msc.onRead(onRead); msc.onWrite(onWrite); msc.onStartStop(onStartStop);
   msc.isWritable(true);
   msc.mediaPresent(true);
-  usbDiskReady = msc.begin(SD_MMC.numSectors(), SD_MMC.sectorSize());
+  usbDiskReady = msc.begin(SD_MMC.cardSize() / SD_MMC.sectorSize(), SD_MMC.sectorSize());
   if (usbDiskReady) USB.begin();
 }
 void serviceButton() {

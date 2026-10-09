@@ -1515,6 +1515,8 @@ public sealed class MainForm : Form
                 throw new InvalidOperationException("The normal application image is unavailable, so an active test cannot safely replace and restore it.");
 
             var diagnostic = await ResolveDiagnosticImage();
+            if (!System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(diagnostic.Path)).Contains("HWCDC_V1", StringComparison.Ordinal))
+                throw new InvalidOperationException("This diagnostic image uses the older USB transport. Wait for the matched current diagnostic build; no firmware was changed.");
             backupFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb", "DiagnosticBackups", DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + port);
             Directory.CreateDirectory(backupFolder);
             var tablePath = Path.Combine(backupFolder, "partition-table.bin");
