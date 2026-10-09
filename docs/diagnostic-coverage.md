@@ -53,6 +53,8 @@ A saved live report proved RAM patterns, both cores, SHA-256, temperature sensin
 
 Normal firmware 2.5.1 was installed and independently verified on the original board; Windows subsequently mounted it as E:. The temporary tester was removed. The hardware-serial diagnostic and its new return path remain preview-only. A complete run via the Manager with report retrieval and verified restoration is the outstanding runtime requirement; no connected drive is visible at the latest check.
 
+Windows host-side verification subsequently identified E: by USB serial 441BF6ED9278 and passed a 256 KiB temporary-file test with nested directories, exact readback hash, rename and cleanup. Only the unique test folder was removed. Buffered Windows reads may be cached; this is evidence of functional filesystem access, not a raw USB read-speed or exhaustive media certification. The repeatable host script uses write-through plus flush for writes.
+
 Implemented source and build verification do not prove hardware operation. The Manager build passes, diagnostic firmware builds pass, and fault tests cover malformed/incomplete reports, identity extraction, layout rejection and modified backups. Internal die-temperature sensing is included. Live execution and automatic recovery/restoration remain unverified. No expanded diagnostic release has been published.
 
 COM6 is the only registered serial port and repeatedly returns no ROM data. Earlier native USB resets and 1200-baud touches also failed. A physical recovery-mode insertion, or another remotely accessible board already in ROM recovery mode, is needed to test the complete workflow. Keep the goal unfinished until that evidence exists; do not advertise the source as a complete hardware certification.
