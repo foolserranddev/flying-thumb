@@ -963,9 +963,9 @@ public sealed class MainForm : Form
                 {
                     LogTransferFailure(device, name, ex);
                     if (transferCancellation!.IsCancellationRequested) { SetStatus(device, "Transfer cancelled"); break; }
-                    lock (gate) { failed.Add(device.Id); errors.Add($"{device.Name} / {name}: {ex.Message}"); }
+                    lock (gate) { failed.Add(device.Id); errors.Add($"{device.Name} / {name}: {TransferError.Describe(ex)}"); }
                     SetStatus(device, "File failed; continuing batch...");
-                    WriteLog($"{device.Name}: FAILED to add {name} - {ex.Message}");
+                    WriteLog($"{device.Name}: FAILED to add {name} - {TransferError.Describe(ex)}");
                 }
                 finally { CompleteTransferProgress(operationId, expectedBytes, $"{name} to {device.Name}"); }
             }
@@ -1118,7 +1118,7 @@ public sealed class MainForm : Form
                 var local = Path.Combine(temp, Guid.NewGuid().ToString("N") + Path.GetExtension(item.Name));
                 var downloadId = $"download:{source.Device.Id}:{item.Name}";
                 try { await client.DownloadAsync(source.Device, item.Name, local, bytes => ReportTransferProgress(downloadId, bytes, $"Reading {item.Name} from {source.Device.Name}"), transferCancellation!.Token); }
-                catch (Exception ex) { LogTransferFailure(source.Device,item.Name,ex); if(transferCancellation!.IsCancellationRequested) break; errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}"); continue; }
+                catch (Exception ex) { LogTransferFailure(source.Device,item.Name,ex); if(transferCancellation!.IsCancellationRequested) break; errors.Add($"Could not read {item.Name} from {source.Device.Name}: {TransferError.Describe(ex)}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {TransferError.Describe(ex)}"); continue; }
                 finally { CompleteTransferProgress(downloadId, source.File.Size, $"Read {item.Name}"); }
                 foreach (var destination in destinations)
                 {
@@ -1126,7 +1126,7 @@ public sealed class MainForm : Form
                     var uploadId = $"upload:{destination.Id}:{item.Name}";
                     SetStatus(destination, $"Syncing {item.Name}...");
                     try { await client.UploadAsync(destination, local, item.Name, Key, bytes => ReportTransferProgress(uploadId, bytes, $"{item.Name} to {destination.Name}"), transferCancellation!.Token); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
-                    catch (Exception ex) { LogTransferFailure(destination,item.Name,ex); if(transferCancellation!.IsCancellationRequested) break; failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {ex.Message}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}"); }
+                    catch (Exception ex) { LogTransferFailure(destination,item.Name,ex); if(transferCancellation!.IsCancellationRequested) break; failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {TransferError.Describe(ex)}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {TransferError.Describe(ex)}"); }
                     finally { CompleteTransferProgress(uploadId, source.File.Size, $"{item.Name} to {destination.Name}"); }
                 }
             }

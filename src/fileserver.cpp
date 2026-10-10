@@ -13,6 +13,7 @@
 #include <esp_wifi.h>
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include "board_config.h"
 #include "display.h"
 #include "ota_health.h"
@@ -27,7 +28,7 @@ namespace {
 constexpr uint16_t DISCOVERY_PORT=4210;
 constexpr uint16_t DNS_PORT=53;
 constexpr char DISCOVERY_REQUEST[]="FLYINGTHUMB_DISCOVER_V1";
-constexpr char FIRMWARE_VERSION_BASE[]="2.5.3";
+constexpr char FIRMWARE_VERSION_BASE[]="2.5.4";
 constexpr uint32_t WPS_PAIRING_WINDOW_MS=120000;
 const IPAddress SETUP_IP(192,168,77,1);
 const IPAddress SETUP_MASK(255,255,255,0);
@@ -92,7 +93,7 @@ void sendCaptivePortal(){server.sendHeader("Cache-Control","no-store");server.se
 void sendWindowsConnectTest(){server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain","Microsoft Connect Test");}
 void sendLegacyWindowsConnectTest(){server.sendHeader("Cache-Control","no-store");server.send(200,"text/plain","Microsoft NCSI");}
 void fillInfo(JsonDocument&d){bool ready=storageReady();uint64_t total=ready?SD_MMC.totalBytes():0,used=ready?SD_MMC.usedBytes():0;d["service"]="flyingthumb";d["protocol"]=1;d["id"]=deviceId;d["name"]=deviceName;d["ip"]=WiFi.getMode()==WIFI_AP?WiFi.softAPIP().toString():WiFi.localIP().toString();d["port"]=80;d["firmware"]=firmwareVersion();d["hardware"]=HARDWARE_PROFILE;d["storageReady"]=ready;d["storageTotal"]=total;d["storageFree"]=total-used;d["claimed"]=managementKey.length()>0;d["setupMode"]=WiFi.getMode()==WIFI_AP;d["usbManaged"]=usbManagedModeActive();d["usbRecoveryAvailable"]=true;}
-void deviceInfo(){JsonDocument d;fillInfo(d);String j;serializeJson(d,j);server.send(200,"application/json",j);}
+void deviceInfo(){JsonDocument d;fillInfo(d);d["lastUploadError"]=uploadError;d["lastUploadBytes"]=uploadBytes;d["uptimeMs"]=millis();d["resetReason"]=(int)esp_reset_reason();d["wifiRssi"]=WiFi.RSSI();String j;serializeJson(d,j);server.send(200,"application/json",j);}
 void appendFiles(JsonArray a,const String& directory){File root=SD_MMC.open(directory);if(!root||!root.isDirectory())return;File f=root.openNextFile();while(f){String name=f.name();int slash=name.lastIndexOf('/');String base=slash>=0?name.substring(slash+1):name;if(base.length()&&base[0]!='.'){String full=name.startsWith("/")?name:(directory=="/"?"/"+name:directory+"/"+name);if(f.isDirectory())appendFiles(a,full);else{JsonObject i=a.add<JsonObject>();i["type"]="file";i["name"]=full;i["size"]=f.size();}}f.close();f=root.openNextFile();}}
 void listFiles(){if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.hasArg("dir")?server.arg("dir"):"/");if(!p.length()){server.send(400,"application/json","[]");return;}JsonDocument d;JsonArray a=d.to<JsonArray>();appendFiles(a,p);String j;serializeJson(d,j);server.send(200,"application/json",j);}
 void downloadFile(){if(!storageReady()){server.send(503,"application/json","{\"error\":\"TF card unavailable\"}");return;}String p=safePath(server.arg("path"));if(!p.length()||p=="/"||!SD_MMC.exists(p)){server.send(404,"text/plain","Not found");return;}File f=SD_MMC.open(p,FILE_READ);if(!f||f.isDirectory()){if(f)f.close();server.send(404,"text/plain","Not found");return;}server.streamFile(f,"application/octet-stream");f.close();}
@@ -133,6 +134,9 @@ void upload(){
   if(!authorized())return;
   HTTPUpload&r=server.upload();
   if(r.status==UPLOAD_FILE_START){
+    // This is an inactivity deadline, not a total-file deadline. The WebServer
+    // default is only five seconds and can abort a progressing slow upload.
+    server.client().setTimeout(30000);
     uploadOk=false;uploadBytes=0;uploadError="";uploadPath=safePath(server.hasArg("path")?server.arg("path"):uploadName(r.filename));
     int slash=uploadPath.lastIndexOf('/');String dir=slash>=0?uploadPath.substring(0,slash+1):String("/");String base=slash>=0?uploadPath.substring(slash+1):uploadPath;
     uploadTempPath=dir+"."+base+".flyingthumb-new";uploadBackupPath=dir+"."+base+".flyingthumb-old";

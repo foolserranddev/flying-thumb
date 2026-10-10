@@ -1,5 +1,13 @@
 # Flying Thumb diagnostic coverage
 
+## Firmware 2.5.4 transfer regression
+
+On 2026-10-10 the physical drive `44:1b:f6:ed:92:78` reproduced connection-reset failures and reported unavailable storage under 2.5.3. The transfer path previously blocked USB writes but re-exposed media for raw reads during the network batch, including around card unmount/remount. Firmware 2.5.4 serializes/drains raw callbacks before remount, blocks all raw access for the batch, and exposes media only after the filesystem is ready again. It also increases the multipart upload inactivity deadline from five to thirty seconds and adds last-upload error/byte count, uptime, reset cause and RSSI to device status. These address concrete access and timeout vulnerabilities; they do not independently prove the precise cause of every earlier disconnect.
+
+The final physical regression uploaded and exactly read back 2,906,584, 2,633,684 and 24,027,584-byte temporary files in one batch, then successfully handed storage back to USB. A separate test using the Manager's actual `UploadAsync`/`DownloadAsync`/`CommitFileBatchAsync` uploaded 24,027,584 bytes in 61.1 seconds, matched every readback byte, deleted the test file and returned USB to writable mode. Final status: storage ready, managed mode off, zero raw read/write failures, uninterrupted uptime through the successful tests. Earlier reboot suspicion was not established by a before/after uptime measurement; final reset reason 3 reflects the deliberate OTA software restart. Only uniquely named temporary test files/directories were removed. Existing user files and Wi-Fi settings were preserved.
+
+Manager 1.1.13 retains underlying transport exceptions in transfer error dialogs and explicitly labels request timeouts. Local tests cover both message cases.
+
 ## Manager 1.1.10 / firmware 2.5.3
 
 The Drives menu exposes one diagnostic command: Diagnose a Drive over USB. It queries the explicitly identified Flying Thumb USB console first, locks and dismounts its Windows volume before requesting recovery, and follows its MAC across re-enumeration. Already-recovering devices enter the existing test workflow directly. A matching interrupted backup is restored and verified automatically before another test. After firmware restoration, an identity-matched Windows volume receives a unique temporary 64 KiB nested-folder write/read/rename/delete test. The restored drive is also discovered by its firmware-derived device ID for a temporary network upload/readback/delete test when reachable and authenticated. Missing volumes/network access are reported as skipped, and host failures remain failures.

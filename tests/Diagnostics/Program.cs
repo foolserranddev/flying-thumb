@@ -1,6 +1,30 @@
 using FlyingThumbManager;
 using System.Text;
 
+if(args.Length==2 && args[0]=="--hardware-transfer") {
+  var device=new Device { Ip=args[1],Id="FT-F61B44",Name="Physical regression" };
+  var physical=new FlyingThumbClient();
+  var local=Path.Combine(Path.GetTempPath(),"FlyingThumb-regression-"+Guid.NewGuid().ToString("N")+".bin");
+  var remote=".FlyingThumb-transfer-test-"+Guid.NewGuid().ToString("N")+"/Manager transfer.bin";
+  var payload=new byte[24027584];for(int i=0;i<payload.Length;i++)payload[i]=(byte)(i%251);
+  await File.WriteAllBytesAsync(local,payload);
+  bool batch=false;
+  try {
+    batch=await physical.BeginFileBatchAsync(device,"");
+    var timer=System.Diagnostics.Stopwatch.StartNew();
+    await physical.UploadAsync(device,local,remote,"");
+    Console.WriteLine($"Manager UploadAsync PASS: {payload.Length} bytes in {timer.Elapsed.TotalSeconds:0.0}s");
+    await physical.DownloadAsync(device,remote,local+".readback");
+    if(!(await File.ReadAllBytesAsync(local+".readback")).SequenceEqual(payload))throw new Exception("Manager readback mismatch");
+    Console.WriteLine("Manager DownloadAsync PASS: exact byte comparison");
+    await physical.DeleteAsync(device,remote,"");
+  } finally {
+    if(batch)await physical.CommitFileBatchAsync(device,"");
+    File.Delete(local);if(File.Exists(local+".readback"))File.Delete(local+".readback");
+  }
+  Console.WriteLine("Manager CommitFileBatchAsync PASS: USB returned to writable");
+  return;
+}
 void Require(bool condition, string name) { if (!condition) throw new Exception(name); }
 void Reject(Action action, string name) { try { action(); } catch (InvalidOperationException) { return; } throw new Exception(name); }
 var results = DiagnosticReport.Parse("FTDIAG|0|BOOT|v2\nFTDIAG|1|RAM|FAIL|address mismatch\nFTDIAG|2|GPIO|DATA40|PASS|HIGH=1\nFTDIAG|3|PSRAM|SKIP|not enabled\nFTDIAG|4|LED|UNVERIFIED_NO_LIGHT_SENSOR\ntruncated|PASS");
@@ -76,6 +100,9 @@ Require(expanded.Count == 7 && expanded.Count(e=>!e.IsFolder)==4,"Expansion reve
 Require(expanded.Single(e=>e.Name=="Rose.bin").Depth==2,"Nested indentation reflects hierarchy");
 Require(expanded.Select(e=>e.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count()==expanded.Count,"Folder nodes deduplicate across drives");
 Console.WriteLine("PASS: folder hierarchy, collapse/expansion, mixed-case paths and root-first sorting.");
+Require(TransferError.Describe(new HttpRequestException("Error copying content",new IOException("Remote host closed connection"))).Contains("Remote host closed connection"),"Underlying transport reason must appear in transfer dialog");
+Require(TransferError.Describe(new TaskCanceledException("Request deadline reached")).Contains("timed out"),"Timeout must be explicitly identified");
+Console.WriteLine("PASS: underlying transfer errors and timeout explanation.");
 
 sealed class CancellationHandler : HttpMessageHandler {
   protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) {

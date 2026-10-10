@@ -22,6 +22,18 @@ uint32_t pressedAt = 0;
 bool resetHandled = false;
 bool usbDiskReady = false, usbUpdateActive = false, usbManagedMode = false;
 volatile bool usbWritesBlocked = false;
+SemaphoreHandle_t rawAccessMutex = nullptr;
+bool rawAccessPaused = false;
+struct RawAccess {
+  bool allowed;
+  RawAccess() { xSemaphoreTake(rawAccessMutex, portMAX_DELAY); allowed = !rawAccessPaused; }
+  ~RawAccess() { xSemaphoreGive(rawAccessMutex); }
+};
+void pauseRawAccess(bool paused) {
+  xSemaphoreTake(rawAccessMutex, portMAX_DELAY); // Drain the current callback before unmounting.
+  rawAccessPaused = paused;
+  xSemaphoreGive(rawAccessMutex);
+}
 BYTE rawDrive = FF_DRV_NOT_USED;
 String diagnosticCommand;
 uint32_t diagnosticRecoveryAt = 0;
@@ -69,6 +81,8 @@ void locateRawDrive() {
 }
 
 int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
+  RawAccess access;
+  if (!access.allowed) return -1;
   if (usbWritesBlocked) return -1;
   const uint32_t sector = SD_MMC.sectorSize();
   if (!sector || sector > 512) return -1;
@@ -100,6 +114,8 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
   return size;
 }
 int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t size) {
+  RawAccess access;
+  if (!access.allowed) return -1;
   const uint32_t sector = SD_MMC.sectorSize();
   if (!sector || sector > 512) return -1;
   uint8_t scratch[512];
@@ -159,6 +175,7 @@ bool prepareUsbRecovery() {
   if (usbUpdateActive || (lastWrite && millis() - lastWrite < 2000)) return false;
   usbWritesBlocked = true;
   if (usbDiskReady) { msc.isWritable(false); msc.mediaPresent(false); }
+  pauseRawAccess(true);
   return true;
 }
 
@@ -178,6 +195,7 @@ bool beginUsbFileUpdate() {
     delay(500);
     msc.isWritable(false);
     msc.mediaPresent(false);
+    pauseRawAccess(true);
     delay(750);
     // USB may have changed FAT metadata since boot. Remount before using the
     // file-level API so it cannot operate from a stale filesystem cache.
@@ -190,7 +208,8 @@ bool beginUsbFileUpdate() {
       return false;
     }
     locateRawDrive();
-    msc.mediaPresent(true);
+    // Keep USB media absent for the ENTIRE network batch. Raw reads must not
+    // race file-level writes, or an SD unmount/remount on the other core.
     delay(250);
     usbManagedMode = true;
     displayMessage("MANAGER ACTIVE", "Updating files", "USB paused");
@@ -205,6 +224,7 @@ bool finishUsbFileUpdate() {
   // then hand the refreshed volume straight back to the machine as writable.
   // Some machines (including Bambu printers) reject read-only USB storage.
   msc.mediaPresent(false);
+  pauseRawAccess(true);
   delay(750);
   SD_MMC.end();
   delay(100);
@@ -219,6 +239,7 @@ bool finishUsbFileUpdate() {
   msc.isWritable(true);
   usbManagedMode = false;
   usbWritesBlocked = false;
+  pauseRawAccess(false);
   msc.mediaPresent(true);
   usbUpdateActive = false;
   delay(250);
@@ -234,6 +255,7 @@ bool releaseUsbManagedMode() {
   if (!usbManagedMode) return true;
   usbWritesBlocked = true;
   msc.mediaPresent(false);
+  pauseRawAccess(true);
   delay(750);
   SD_MMC.end();
   delay(100);
@@ -247,6 +269,7 @@ bool releaseUsbManagedMode() {
   msc.isWritable(true);
   usbManagedMode = false;
   usbWritesBlocked = false;
+  pauseRawAccess(false);
   msc.mediaPresent(true);
   delay(250);
   displayMessage("USB WRITABLE", "Manager released", "WiFi ready");
@@ -254,6 +277,7 @@ bool releaseUsbManagedMode() {
 }
 
 void setup() {
+  rawAccessMutex = xSemaphoreCreateMutex();
   diagnosticConsole.enableReboot(false); // Recovery is explicit, never a serial line-state side effect.
   diagnosticConsole.begin(115200);
   Serial.begin(115200); pinMode(PIN_BUTTON, INPUT_PULLUP); initDisplay();
