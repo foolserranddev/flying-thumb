@@ -16,6 +16,25 @@ public sealed class MainForm : Form
     readonly HashSet<string> expandedFolders = new(StringComparer.OrdinalIgnoreCase);
     string[] browserFilePaths = [];
     static BrowserEntry? BrowserRow(DataGridViewRow row) => row.Tag as BrowserEntry;
+    internal async Task TestTransferQueue(string output)
+    {
+        var order=new List<int>();var release=new TaskCompletionSource();
+        var running=QueueTransfer(async()=> { order.Add(1);SetBusy(true);BeginTransferProgress(1000,1,"Copying Pattern.pes...");ReportTransferProgress("test",350,"Pattern.pes to Cutting Table");await release.Task;order.Add(2);EndTransferProgress();SetBusy(false); });
+        transferWindow!.Opacity=0;
+        await QueueTransfer(()=> { order.Add(3);return Task.CompletedTask; });
+        if(!addButton.Enabled || transferQueue.Count!=1 || tabs.SelectedIndex!=0)throw new Exception("Browser/queue state incorrect");
+        using(var bitmap=new Bitmap(transferWindow.Width,transferWindow.Height)) { transferWindow.DrawToBitmap(bitmap,new Rectangle(Point.Empty,transferWindow.Size));bitmap.Save(output,System.Drawing.Imaging.ImageFormat.Png); }
+        release.SetResult();await running;
+        if(!order.SequenceEqual(new[]{1,2,3}) || transferQueueRunning)throw new Exception("Transfers did not execute serially");
+        var cancelRelease=new TaskCompletionSource();
+        var cancelled=QueueTransfer(async()=> { BeginTransferProgress(100,1,"Cancellation test");await cancelRelease.Task; });
+        transferWindow!.Opacity=0;
+        await QueueTransfer(()=>throw new Exception("Cancelled queued work executed"));
+        CancelQueuedTransfers();
+        if(!transferCancellation!.IsCancellationRequested || transferQueue.Count!=0)throw new Exception("Cancellation did not clear queue");
+        cancelRelease.SetResult();await cancelled;
+        File.WriteAllText(output+".result","PASS: ordered queue, adding while busy, file view retained, active cancellation, pending work cleared, popup cleanup.");
+    }
     internal void RenderBrowserPreview(string output)
     {
         devices.Clear();
@@ -37,6 +56,9 @@ public sealed class MainForm : Form
     readonly ToolStripProgressBar transferProgress = new() { Minimum = 0, Maximum = 1000, Value = 0, Width = 190, Visible = false };
     readonly ToolStripButton cancelTransfer = new("Cancel transfer") { Visible = false };
     CancellationTokenSource? transferCancellation;
+    readonly Queue<Func<Task>> transferQueue = new();
+    bool transferQueueRunning, transferQueueCancelled;
+    TransferWindow? transferWindow;
     bool transferWasCancelled;
     readonly Stopwatch transferClock = new();
     readonly string sessionLogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb", "Logs", $"manager-{DateTime.Now:yyyyMMdd-HHmmss}.log");
@@ -145,7 +167,7 @@ public sealed class MainForm : Form
         split.Panel2.Padding = new Padding(10, 5, 10, 5); split.Panel2.Controls.Add(fileArea);
         summary.Spring = true; summary.TextAlign = ContentAlignment.MiddleLeft;
         var status = new StatusStrip { BackColor = Color.FromArgb(245, 245, 245), SizingGrip = true }; status.Items.AddRange([summary, transferDetail, transferProgress, cancelTransfer]);
-        cancelTransfer.Click += (_, _) => { transferWasCancelled = true; transferCancellation?.Cancel(); cancelTransfer.Enabled = false; summary.Text = "Cancelling transfer; finishing drive cleanup..."; WriteLog("User requested transfer cancellation. Already confirmed files are retained."); };
+        cancelTransfer.Click += (_, _) => CancelQueuedTransfers();
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.Controls.Add(menu, 0, 0); root.Controls.Add(updateBanner, 0, 1); root.Controls.Add(split, 0, 2); root.Controls.Add(status, 0, 3);
@@ -162,6 +184,7 @@ public sealed class MainForm : Form
         setupNetworkTimer.Tick += (_, _) => CheckForSetupNetwork();
         Shown += async (_, _) => { if (diagnosticWorker) return; WriteLog($"Flying Thumb Manager {UpdateService.CurrentManagerVersion} started."); await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
         FormClosing += (_, _) => { if (!diagnosticWorker) ManagerSettings.SaveWindowSize(WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size, WindowState == FormWindowState.Maximized); };
+        FormClosing += (_,e) => { if(transferQueueRunning) { e.Cancel=true; MessageBox.Show(this,"Do not remove the drive or close the app while transferring. Cancel the transfer and wait for cleanup before closing.","Transfer in progress",MessageBoxButtons.OK,MessageBoxIcon.Warning); } };
         FormClosed += (_, _) => setupNetworkTimer.Stop();
     }
 
@@ -378,24 +401,24 @@ public sealed class MainForm : Form
         fileGrid.SelectionChanged += (_, _) => UpdateFileActionButtons();
         fileGrid.CellPainting += PaintBrowserName;
         fileGrid.CellMouseClick += (_, e) => {
-            if (busy || e.RowIndex < 0 || e.ColumnIndex != fileGrid.Columns["FileName"]?.Index || e.Button != MouseButtons.Left) return;
+            if (busy && !transferQueueRunning || e.RowIndex < 0 || e.ColumnIndex != fileGrid.Columns["FileName"]?.Index || e.Button != MouseButtons.Left) return;
             var entry = BrowserRow(fileGrid.Rows[e.RowIndex]);
             if (entry?.IsFolder == true && e.X < (entry.Depth * 22 + 28) * DeviceDpi / 96f) ToggleFolder(entry.Path);
         };
         fileGrid.CellDoubleClick += (_, e) => { if(e.RowIndex >= 0 && BrowserRow(fileGrid.Rows[e.RowIndex]) is { IsFolder:true } folder) ToggleFolder(folder.Path); };
         fileGrid.KeyDown += (_, e) => {
-            if(busy || fileGrid.CurrentRow is not { } row || BrowserRow(row) is not { IsFolder:true } folder) return;
+            if(busy && !transferQueueRunning || fileGrid.CurrentRow is not { } row || BrowserRow(row) is not { IsFolder:true } folder) return;
             if(e.KeyCode == Keys.Right && !expandedFolders.Contains(folder.Path) || e.KeyCode == Keys.Left && expandedFolders.Contains(folder.Path)) { e.Handled=true; e.SuppressKeyPress=true; ToggleFolder(folder.Path); }
         };
         fileGrid.AllowDrop = true;
         fileGrid.DragOver += (_, e) => {
-            e.Effect = !busy && e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effect = (!busy || transferQueueRunning) && e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
             var point = fileGrid.PointToClient(new Point(e.X,e.Y)); var hit = fileGrid.HitTest(point.X,point.Y);
             var entry = hit.RowIndex >= 0 ? BrowserRow(fileGrid.Rows[hit.RowIndex]) : null;
             summary.Text = "Drop into /" + (entry?.IsFolder == true ? entry.Path : entry?.Path.Contains('/') == true ? entry.Path[..entry.Path.LastIndexOf('/')] : "");
         };
         fileGrid.DragDrop += async (_, e) => {
-            if(busy || e.Data?.GetData(DataFormats.FileDrop) is not string[] paths) return;
+            if(busy && !transferQueueRunning || e.Data?.GetData(DataFormats.FileDrop) is not string[] paths) return;
             var point = fileGrid.PointToClient(new Point(e.X,e.Y)); var hit = fileGrid.HitTest(point.X,point.Y);
             var entry = hit.RowIndex >= 0 ? BrowserRow(fileGrid.Rows[hit.RowIndex]) : null;
             var destination = entry?.IsFolder == true ? entry.Path : entry?.Path.Contains('/') == true ? entry.Path[..entry.Path.LastIndexOf('/')] : "";
@@ -515,7 +538,7 @@ public sealed class MainForm : Form
     }
     void ToggleAllFiles()
     {
-        if (busy || fileGrid.Rows.Count == 0) return;
+        if (busy && !transferQueueRunning || fileGrid.Rows.Count == 0) return;
         var checkAll = fileCheckHeader?.HeaderCheckState != CheckState.Checked;
         checkedFiles.Clear(); if(checkAll) checkedFiles.UnionWith(browserFilePaths);
         renderingFileMatrix = true;
@@ -547,10 +570,12 @@ public sealed class MainForm : Form
     {
         busy = value;
         addButton.Enabled = syncButton.Enabled = refreshFilesButton.Enabled = deleteFilesButton.Enabled = updateNowButton.Enabled = !value;
+        if(transferQueueRunning) addButton.Enabled=syncButton.Enabled=true;
         UseWaitCursor = value;
         Cursor = value ? Cursors.WaitCursor : Cursors.Default;
         deviceGrid.UseWaitCursor = value;
         fileGrid.UseWaitCursor = value;
+        if(transferQueueRunning) { UseWaitCursor=deviceGrid.UseWaitCursor=fileGrid.UseWaitCursor=false;Cursor=deviceGrid.Cursor=fileGrid.Cursor=Cursors.Default; }
         if (!value)
         {
             deviceGrid.Cursor = Cursors.Default;
@@ -564,10 +589,12 @@ public sealed class MainForm : Form
     void BeginTransferProgress(long totalBytes, int totalOperations, string text)
     {
         transferCancellation?.Dispose(); transferCancellation = new(); transferWasCancelled = false; cancelTransfer.Visible = cancelTransfer.Enabled = true;
+        if(transferQueueCancelled) { transferWasCancelled=true; transferCancellation.Cancel(); }
         transferClock.Restart();
         lock (transferProgressGate) { activeTransferBytes.Clear(); transferCompletedBytes = 0; transferTotalBytes = Math.Max(1, totalBytes); transferCompletedOperations = 0; transferTotalOperations = Math.Max(1, totalOperations); }
         transferDetail.Text = text; transferDetail.Visible = transferProgress.Visible = true; transferProgress.Value = 0;
         UseWaitCursor = deviceGrid.UseWaitCursor = fileGrid.UseWaitCursor = false; Cursor = deviceGrid.Cursor = fileGrid.Cursor = Cursors.Default;
+        transferWindow?.UpdateProgress(text,0,transferQueue.Count);
     }
 
     void ReportTransferProgress(string operationId, long bytes, string detail)
@@ -577,6 +604,7 @@ public sealed class MainForm : Form
         var percent = Math.Clamp((int)Math.Round(current * 100d / transferTotalBytes), 0, 100);
         transferProgress.Value = Math.Clamp(percent * 10, transferProgress.Minimum, transferProgress.Maximum);
         transferDetail.Text = $"{Math.Min(transferCompletedOperations + 1, transferTotalOperations)}/{transferTotalOperations}  {detail}  {percent}%";
+        transferWindow?.UpdateProgress(transferDetail.Text,transferProgress.Value,transferQueue.Count);
     }
 
     void CompleteTransferProgress(string operationId, long expectedBytes, string detail)
@@ -586,6 +614,7 @@ public sealed class MainForm : Form
         var percent = Math.Clamp((int)Math.Round(current * 100d / transferTotalBytes), 0, 100);
         transferProgress.Value = Math.Clamp(percent * 10, transferProgress.Minimum, transferProgress.Maximum);
         transferDetail.Text = $"{Math.Min(transferCompletedOperations, transferTotalOperations)}/{transferTotalOperations}  {detail}  {percent}%";
+        transferWindow?.UpdateProgress(transferDetail.Text,transferProgress.Value,transferQueue.Count);
     }
 
     void EndTransferProgress()
@@ -747,7 +776,7 @@ public sealed class MainForm : Form
 
     async Task ChooseAndSync()
     {
-        if (busy) return;
+        if (busy && !transferQueueRunning) return;
         var targets = SelectedDevices();
         if (targets.Length < 2) { MessageBox.Show(this, "Include at least two drives before syncing.", "Sync Drives", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
         var checkedNames = CheckedFileNames();
@@ -855,10 +884,35 @@ public sealed class MainForm : Form
         await AddFiles(items);
     }
 
-    async Task AddFiles(UploadItem[] items)
+    Task AddFiles(UploadItem[] items)
     {
-        if (busy || items.Length == 0) return;
-        var targets = SelectedDevices();
+        var targets = SelectedDevices().ToArray();
+        return QueueTransfer(() => AddFilesCore(items,targets));
+    }
+    void CancelQueuedTransfers()
+    {
+        transferQueueCancelled=transferWasCancelled=true; transferQueue.Clear();transferCancellation?.Cancel();cancelTransfer.Enabled=false;
+        summary.Text="Cancelling transfer; finishing drive cleanup...";WriteLog("User cancelled the active transfer and cleared pending transfers. Confirmed files are retained.");
+    }
+    async Task QueueTransfer(Func<Task> action)
+    {
+        if(busy && !transferQueueRunning)return;
+        if(transferQueueCancelled && transferQueueRunning) { MessageBox.Show(this,"Wait for cancellation cleanup before adding another transfer.");return; }
+        transferQueue.Enqueue(action);
+        if(transferQueueRunning) { summary.Text=$"{transferQueue.Count} additional transfer(s) queued";transferWindow?.UpdateProgress(transferDetail.Text ?? "Preparing transfer...",transferProgress.Value,transferQueue.Count);return; }
+        transferQueueRunning=true;transferQueueCancelled=false;
+        transferWindow=new TransferWindow { Icon=Icon };transferWindow.CancelRequested+=(_,_)=>CancelQueuedTransfers();transferWindow.UpdateProgress("Preparing transfer...",0,0);transferWindow.Show(this);
+        try {
+            while(transferQueue.Count>0 && !transferQueueCancelled) {
+                var next=transferQueue.Dequeue();
+                try { await next(); } catch(Exception ex) { WriteLog("Transfer failed: "+ex);MessageBox.Show(this,ex.Message,"Transfer failed",MessageBoxButtons.OK,MessageBoxIcon.Warning); }
+            }
+        }
+        finally { transferQueue.Clear();transferQueueRunning=false;transferWindow.Finish();transferWindow=null;EndTransferProgress();SetBusy(false); }
+    }
+    async Task AddFilesCore(UploadItem[] items,Device[] targets)
+    {
+        if (items.Length == 0) return;
         if (targets.Length == 0) { MessageBox.Show("Select at least one drive first."); return; }
         if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets)) return;
         if (!EnsureManagedFirmware(targets)) return;
@@ -866,7 +920,6 @@ public sealed class MainForm : Form
         if (!ConfirmManagedUsb(targets)) return;
 
         SetBusy(true);
-        tabs.SelectedIndex = 1;
         WriteLog($"Adding {items.Length} file(s) to {targets.Length} selected drive(s) as one batch...");
         var fileSizes = items.ToDictionary(item => item.LocalPath, item => new FileInfo(item.LocalPath).Length, StringComparer.OrdinalIgnoreCase);
         BeginTransferProgress(fileSizes.Values.Sum() * targets.Length, items.Length * targets.Length, "Preparing transfer...");
@@ -965,15 +1018,17 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "The batch continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb File Transfer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
-    async Task SyncAcrossDevices(IReadOnlyCollection<string>? onlyFiles = null)
+    Task SyncAcrossDevices(IReadOnlyCollection<string>? onlyFiles = null)
     {
-        if (busy) return;
-        var targets = SelectedDevices();
+        var targets=SelectedDevices().ToArray();var names=onlyFiles?.ToArray();
+        return QueueTransfer(()=>SyncAcrossDevicesCore(names,targets));
+    }
+    async Task SyncAcrossDevicesCore(IReadOnlyCollection<string>? onlyFiles,Device[] targets)
+    {
         if (targets.Length < 2) { MessageBox.Show(this, "Include at least two drives before syncing.", "Sync Drives", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
         if (!EnsureStorageAvailable(targets) || !EnsureManagementKey(targets) || !EnsureManagedFirmware(targets)) return;
 
         SetBusy(true);
-        tabs.SelectedIndex = 1;
         var selectedNames = onlyFiles?.ToHashSet(StringComparer.OrdinalIgnoreCase);
         WriteLog(selectedNames is null ? $"Building an additive sync plan across {targets.Length} drives..." : $"Building a sync plan for {selectedNames.Count} selected file(s) across {targets.Length} drives...");
         var current = new Dictionary<string, List<RemoteFile>>(StringComparer.OrdinalIgnoreCase);
