@@ -1,5 +1,13 @@
 # Flying Thumb diagnostic coverage
 
+## Manager 1.1.10 / firmware 2.5.3
+
+The Drives menu exposes one diagnostic command: Diagnose a Drive over USB. It queries the explicitly identified Flying Thumb USB console first, locks and dismounts its Windows volume before requesting recovery, and follows its MAC across re-enumeration. Already-recovering devices enter the existing test workflow directly. A matching interrupted backup is restored and verified automatically before another test. After firmware restoration, an identity-matched Windows volume receives a unique temporary 64 KiB nested-folder write/read/rename/delete test. The restored drive is also discovered by its firmware-derived device ID for a temporary network upload/readback/delete test when reachable and authenticated. Missing volumes/network access are reported as skipped, and host failures remain failures.
+
+Normal firmware now exposes USB CDC alongside storage, including when no card mounts. It reports read/write failure counters and the last failing sector before recovery; these counters are reset by reboot. Opening its console cannot trigger line-state resets. Firmware older than 2.5.3 or an unresponsive application cannot accept this new command, so a one-time firmware upgrade or physical recovery may still be required. The new normal-to-recovery path is compiled but has not yet been physically exercised.
+
+Manager uploads/sync support cancellation of active HTTP transfers and stop scheduling subsequent files, then finalize any opened file batches without the cancelled token. Confirmed files remain cached; cancelled/unacknowledged uploads are not claimed successful. Persistent timestamped logs record drive address, firmware, path, size, server error and exception, accessible via Help > View Diagnostic Log. Upload/download cancellation has local automated tests. The transfer timeout was increased from 90 seconds to ten minutes to avoid aborting slow but progressing large copies; this is not a fix for USB storage hardware/transport errors.
+
 Results must distinguish PASS, FAIL, SKIP, UNVERIFIED and incomplete execution. A successful command does not establish that every circuit attached to it works.
 
 | Failure point | Available evidence/test | Coverage limit |

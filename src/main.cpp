@@ -1,7 +1,9 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <SD_MMC.h>
 #include <USB.h>
 #include <USBMSC.h>
+#include <USBCDC.h>
 #include <tusb.h>
 #include <diskio.h>
 #include <diskio_impl.h>
@@ -13,6 +15,7 @@
 #include "esp32-hal-tinyusb.h"
 
 USBMSC msc;
+USBCDC diagnosticConsole;
 namespace {
 volatile uint32_t lastRead = 0, lastWrite = 0;
 uint32_t pressedAt = 0;
@@ -20,6 +23,35 @@ bool resetHandled = false;
 bool usbDiskReady = false, usbUpdateActive = false, usbManagedMode = false;
 volatile bool usbWritesBlocked = false;
 BYTE rawDrive = FF_DRV_NOT_USED;
+String diagnosticCommand;
+uint32_t diagnosticRecoveryAt = 0;
+volatile uint32_t usbReadErrors = 0, usbWriteErrors = 0, usbErrorLba = 0;
+int32_t storageFailure(bool write, uint32_t lba) {
+  if (write) ++usbWriteErrors; else ++usbReadErrors;
+  usbErrorLba = lba;
+  return -1;
+}
+
+void serviceDiagnosticConsole() {
+  while (diagnosticConsole.available()) {
+    char c = diagnosticConsole.read();
+    if (c == '\n') {
+      diagnosticCommand.trim();
+      if (diagnosticCommand == "FTUSB ID") {
+        diagnosticConsole.printf("FTUSB|ID|%s\n", WiFi.macAddress().c_str());
+        diagnosticConsole.printf("FTUSB|STORAGE|ready=%u|readErrors=%lu|writeErrors=%lu|lastErrorLba=%lu|managed=%u\n", usbDiskReady, (unsigned long)usbReadErrors, (unsigned long)usbWriteErrors, (unsigned long)usbErrorLba, usbManagedMode);
+      } else if (diagnosticCommand == "FTUSB RECOVERY") {
+        if (prepareUsbRecovery()) {
+          diagnosticConsole.println("FTUSB|RECOVERY|OK");
+          diagnosticRecoveryAt = millis() + 500;
+        } else diagnosticConsole.println("FTUSB|RECOVERY|BUSY");
+      }
+      diagnosticCommand = "";
+    } else if (diagnosticCommand.length() < 80) diagnosticCommand += c;
+    else diagnosticCommand = "";
+  }
+  if (diagnosticRecoveryAt && millis() >= diagnosticRecoveryAt) enterUsbRecovery();
+}
 
 void locateRawDrive() {
   rawDrive = FF_DRV_NOT_USED;
@@ -50,17 +82,17 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size) {
     if (withinSector == 0 && remaining >= sector && rawDrive != FF_DRV_NOT_USED &&
         (reinterpret_cast<uintptr_t>(buffer + completed) & 3) == 0) {
       const UINT sectorCount = remaining / sector;
-      if (disk_write(rawDrive, buffer + completed, targetLba, sectorCount) != RES_OK) return -1;
+      if (disk_write(rawDrive, buffer + completed, targetLba, sectorCount) != RES_OK) return storageFailure(true, targetLba);
       completed += sectorCount * sector;
       continue;
     }
     const uint32_t chunk = min(size - completed, sector - withinSector);
     if (withinSector == 0 && chunk == sector) {
-      if (!SD_MMC.writeRAW(buffer + completed, targetLba)) return -1;
+      if (!SD_MMC.writeRAW(buffer + completed, targetLba)) return storageFailure(true, targetLba);
     } else {
-      if (!SD_MMC.readRAW(scratch, targetLba)) return -1;
+      if (!SD_MMC.readRAW(scratch, targetLba)) return storageFailure(false, targetLba);
       memcpy(scratch + withinSector, buffer + completed, chunk);
-      if (!SD_MMC.writeRAW(scratch, targetLba)) return -1;
+      if (!SD_MMC.writeRAW(scratch, targetLba)) return storageFailure(true, targetLba);
     }
     completed += chunk;
   }
@@ -81,15 +113,15 @@ int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t size) {
     if (withinSector == 0 && remaining >= sector && rawDrive != FF_DRV_NOT_USED &&
         (reinterpret_cast<uintptr_t>(destination + completed) & 3) == 0) {
       const UINT sectorCount = remaining / sector;
-      if (disk_read(rawDrive, destination + completed, sourceLba, sectorCount) != RES_OK) return -1;
+      if (disk_read(rawDrive, destination + completed, sourceLba, sectorCount) != RES_OK) return storageFailure(false, sourceLba);
       completed += sectorCount * sector;
       continue;
     }
     const uint32_t chunk = min(size - completed, sector - withinSector);
     if (withinSector == 0 && chunk == sector) {
-      if (!SD_MMC.readRAW(destination + completed, sourceLba)) return -1;
+      if (!SD_MMC.readRAW(destination + completed, sourceLba)) return storageFailure(false, sourceLba);
     } else {
-      if (!SD_MMC.readRAW(scratch, sourceLba)) return -1;
+      if (!SD_MMC.readRAW(scratch, sourceLba)) return storageFailure(false, sourceLba);
       memcpy(destination + completed, scratch + withinSector, chunk);
     }
     completed += chunk;
@@ -222,6 +254,8 @@ bool releaseUsbManagedMode() {
 }
 
 void setup() {
+  diagnosticConsole.enableReboot(false); // Recovery is explicit, never a serial line-state side effect.
+  diagnosticConsole.begin(115200);
   Serial.begin(115200); pinMode(PIN_BUTTON, INPUT_PULLUP); initDisplay();
   setDeviceStatus(DeviceStatus::Starting);
   displayMessage("FLYING THUMB", "Starting...", "");
@@ -236,10 +270,12 @@ void setup() {
     Serial.println("TF card unavailable; Wi-Fi setup remains active");
     setDeviceStatus(DeviceStatus::Fault);
     displayMessage("TF CARD ERROR", "Card unavailable", "WiFi still ready");
+    USB.begin(); // Keep USB diagnostics reachable even without a working card.
   }
   finishOtaHealthCheck(cardReady);
 }
 void loop() {
+  serviceDiagnosticConsole();
   serviceButton(); handleNetworkAndServer();
   setActivityLed(millis() - lastRead < 250, millis() - lastWrite < 250); handleStatusLed(); handleDisplayPower(); delay(2);
 }

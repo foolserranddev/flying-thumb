@@ -18,6 +18,11 @@ public sealed class MainForm : Form
     readonly ToolStripStatusLabel summary = new("Ready");
     readonly ToolStripStatusLabel transferDetail = new() { Visible = false, AutoSize = false, Width = 420, TextAlign = ContentAlignment.MiddleRight };
     readonly ToolStripProgressBar transferProgress = new() { Minimum = 0, Maximum = 1000, Value = 0, Width = 190, Visible = false };
+    readonly ToolStripButton cancelTransfer = new("Cancel transfer") { Visible = false };
+    CancellationTokenSource? transferCancellation;
+    bool transferWasCancelled;
+    readonly Stopwatch transferClock = new();
+    readonly string sessionLogPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb", "Logs", $"manager-{DateTime.Now:yyyyMMdd-HHmmss}.log");
     readonly Button addButton = new() { Text = "Add files", AutoSize = true };
     readonly Button syncButton = new() { Text = "Sync...", AutoSize = true };
     readonly Button refreshFilesButton = new() { Text = "Refresh", AutoSize = true };
@@ -122,7 +127,8 @@ public sealed class MainForm : Form
         split.Panel1.Padding = new Padding(10, 0, 10, 5); split.Panel1.Controls.Add(deviceGrid);
         split.Panel2.Padding = new Padding(10, 5, 10, 5); split.Panel2.Controls.Add(fileArea);
         summary.Spring = true; summary.TextAlign = ContentAlignment.MiddleLeft;
-        var status = new StatusStrip { BackColor = Color.FromArgb(245, 245, 245), SizingGrip = true }; status.Items.AddRange([summary, transferDetail, transferProgress]);
+        var status = new StatusStrip { BackColor = Color.FromArgb(245, 245, 245), SizingGrip = true }; status.Items.AddRange([summary, transferDetail, transferProgress, cancelTransfer]);
+        cancelTransfer.Click += (_, _) => { transferWasCancelled = true; transferCancellation?.Cancel(); cancelTransfer.Enabled = false; summary.Text = "Cancelling transfer; finishing drive cleanup..."; WriteLog("User requested transfer cancellation. Already confirmed files are retained."); };
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, ColumnCount = 1 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize)); root.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.Controls.Add(menu, 0, 0); root.Controls.Add(updateBanner, 0, 1); root.Controls.Add(split, 0, 2); root.Controls.Add(status, 0, 3);
@@ -259,17 +265,14 @@ public sealed class MainForm : Form
         drives.DropDownItems.Add(Item("Return Selected Drives to Writable USB Mode...", async (_, _) => await ReleaseManagedUsb()));
         drives.DropDownItems.Add(new ToolStripSeparator());
         drives.DropDownItems.Add(Item("Install / Recover a Drive via USB...", RecoverUsb));
-        drives.DropDownItems.Add(Item("Diagnose a Drive via USB...", DiagnoseUsb));
-        drives.DropDownItems.Add(Item("Restart Selected Drive into USB Recovery...", EnterNetworkUsbRecovery));
-        drives.DropDownItems.Add(Item("Restore an Interrupted Diagnostic...", RestoreDiagnostic));
-        drives.DropDownItems.Add(Item("Test Selected Drive's Network File Access...", DiagnoseNetworkFiles));
-        drives.DropDownItems.Add(Item("Test Drive's Windows File Access...", DiagnoseWindowsFiles));
+        drives.DropDownItems.Add(Item("Diagnose a Drive over USB...", DiagnoseUsb));
 
         var settings = new ToolStripMenuItem("Settings");
         settings.DropDownItems.Add(Item("Shop Management Key...", EditShopKey));
 
         var help = new ToolStripMenuItem("Help");
         help.DropDownItems.Add(Item("Check for Updates...", async (_, _) => await CheckForUpdates(true)));
+        help.DropDownItems.Add(Item("View Diagnostic Log...", (_, _) => { WriteLog("Diagnostic log opened."); ShowDiagnosticReport("Manager activity and transfer log", File.ReadAllText(sessionLogPath), false); }));
         help.DropDownItems.Add(new ToolStripSeparator());
         help.DropDownItems.Add(Item("About Flying Thumb Manager", (_, _) => ShowAbout()));
 
@@ -469,7 +472,8 @@ public sealed class MainForm : Form
         deleteFilesButton.Enabled = !busy && (checkedFiles.Count > 0 || fileGrid.SelectedRows.Count > 0);
     }
     void SelectAll(bool selected) { foreach (var d in devices) d.Selected = selected; deviceGrid.Refresh(); RenderFileMatrix(); }
-    void WriteLog(string message) { if (InvokeRequired) { BeginInvoke(() => WriteLog(message)); return; } log.AppendText($"{DateTime.Now:t}  {message}{Environment.NewLine}"); }
+    void WriteLog(string message) { if (InvokeRequired) { BeginInvoke(() => WriteLog(message)); return; } var line = $"{DateTime.Now:O}  {message}{Environment.NewLine}"; log.AppendText(line); try { Directory.CreateDirectory(Path.GetDirectoryName(sessionLogPath)!); File.AppendAllText(sessionLogPath,line); } catch { } }
+    void LogTransferFailure(Device device, string path, Exception error) => WriteLog($"TRANSFER FAILURE drive={device.Name} address={device.BaseUri} firmware={device.Firmware} file={path} elapsed={transferClock.Elapsed.TotalSeconds:0.0}s exception={error.GetType().Name} detail={error.Message} inner={error.InnerException?.Message}. Log: {sessionLogPath}");
     void SetBusy(bool value)
     {
         busy = value;
@@ -490,6 +494,8 @@ public sealed class MainForm : Form
 
     void BeginTransferProgress(long totalBytes, int totalOperations, string text)
     {
+        transferCancellation?.Dispose(); transferCancellation = new(); transferWasCancelled = false; cancelTransfer.Visible = cancelTransfer.Enabled = true;
+        transferClock.Restart();
         lock (transferProgressGate) { activeTransferBytes.Clear(); transferCompletedBytes = 0; transferTotalBytes = Math.Max(1, totalBytes); transferCompletedOperations = 0; transferTotalOperations = Math.Max(1, totalOperations); }
         transferDetail.Text = text; transferDetail.Visible = transferProgress.Visible = true; transferProgress.Value = 0;
         UseWaitCursor = deviceGrid.UseWaitCursor = fileGrid.UseWaitCursor = false; Cursor = deviceGrid.Cursor = fileGrid.Cursor = Cursors.Default;
@@ -507,7 +513,7 @@ public sealed class MainForm : Form
     void CompleteTransferProgress(string operationId, long expectedBytes, string detail)
     {
         if (InvokeRequired) { BeginInvoke(() => CompleteTransferProgress(operationId, expectedBytes, detail)); return; }
-        long current; lock (transferProgressGate) { activeTransferBytes.Remove(operationId); transferCompletedBytes += Math.Max(0, expectedBytes); transferCompletedOperations++; current = transferCompletedBytes + activeTransferBytes.Values.Sum(); }
+        long current; lock (transferProgressGate) { var observed = activeTransferBytes.GetValueOrDefault(operationId); activeTransferBytes.Remove(operationId); transferCompletedBytes += Math.Clamp(observed, 0, Math.Max(0, expectedBytes)); transferCompletedOperations++; current = transferCompletedBytes + activeTransferBytes.Values.Sum(); }
         var percent = Math.Clamp((int)Math.Round(current * 100d / transferTotalBytes), 0, 100);
         transferProgress.Value = Math.Clamp(percent * 10, transferProgress.Minimum, transferProgress.Maximum);
         transferDetail.Text = $"{Math.Min(transferCompletedOperations, transferTotalOperations)}/{transferTotalOperations}  {detail}  {percent}%";
@@ -517,6 +523,7 @@ public sealed class MainForm : Form
     {
         if (InvokeRequired) { BeginInvoke(EndTransferProgress); return; }
         transferProgress.Visible = transferDetail.Visible = false; transferProgress.Value = 0;
+        cancelTransfer.Visible = false;
         lock (transferProgressGate) activeTransferBytes.Clear();
     }
 
@@ -795,20 +802,24 @@ public sealed class MainForm : Form
         {
             foreach (var item in items)
             {
+                if (transferCancellation!.IsCancellationRequested) break;
                 var path = item.LocalPath;
                 var name = item.RemotePath;
                 var operationId = $"{device.Id}:{name}";
                 var expectedBytes = fileSizes[path];
                 SetStatus(device, $"Adding {name}...");
+                WriteLog($"UPLOAD START drive={device.Name} address={device.BaseUri} firmware={device.Firmware} file={name} bytes={expectedBytes}");
                 try
                 {
-                    await client.UploadAsync(device, path, name, Key, bytes => ReportTransferProgress(operationId, bytes, $"{name} to {device.Name}"));
+                    await client.UploadAsync(device, path, name, Key, bytes => ReportTransferProgress(operationId, bytes, $"{name} to {device.Name}"), transferCancellation!.Token);
                     RecordUploadedFile(device, name, expectedBytes);
                     lock (gate) changed.Add(device.Id);
                     WriteLog($"{device.Name}: added {name}.");
                 }
                 catch (Exception ex)
                 {
+                    LogTransferFailure(device, name, ex);
+                    if (transferCancellation!.IsCancellationRequested) { SetStatus(device, "Transfer cancelled"); break; }
                     lock (gate) { failed.Add(device.Id); errors.Add($"{device.Name} / {name}: {ex.Message}"); }
                     SetStatus(device, "File failed; continuing batch...");
                     WriteLog($"{device.Name}: FAILED to add {name} - {ex.Message}");
@@ -852,7 +863,8 @@ public sealed class MainForm : Form
         foreach (var device in devices.Where(d => failed.Contains(d.Id))) SetStatus(device, "Transfer incomplete");
         RenderFileMatrix();
 
-        if (errors.Count == 0)
+        if (transferWasCancelled) { summary.Text = "Transfer cancelled; confirmed files retained"; WriteLog("Transfer cancelled; batch cleanup finished."); }
+        else if (errors.Count == 0)
         {
             summary.Text = $"Added {items.Length} file(s) to {targets.Length} drive(s)";
             WriteLog("File batch finished successfully; USB refreshed once after all uploads.");
@@ -952,6 +964,7 @@ public sealed class MainForm : Form
         {
             foreach (var item in plan)
             {
+                if (transferCancellation!.IsCancellationRequested) break;
                 var availableSources = item.Sources.Where(source => !blocked.Contains(source.Device.Id)).ToArray();
                 if (availableSources.Length == 0) { errors.Add($"Could not read {item.Name}: its chosen source drive did not enter managed mode."); WriteLog($"FAILED to stage {item.Name}; no prepared source drive is available."); continue; }
                 var source = availableSources[0];
@@ -959,15 +972,16 @@ public sealed class MainForm : Form
                 if (destinations.Length == 0) continue;
                 var local = Path.Combine(temp, Guid.NewGuid().ToString("N") + Path.GetExtension(item.Name));
                 var downloadId = $"download:{source.Device.Id}:{item.Name}";
-                try { await client.DownloadAsync(source.Device, item.Name, local, bytes => ReportTransferProgress(downloadId, bytes, $"Reading {item.Name} from {source.Device.Name}")); }
-                catch (Exception ex) { errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}"); continue; }
+                try { await client.DownloadAsync(source.Device, item.Name, local, bytes => ReportTransferProgress(downloadId, bytes, $"Reading {item.Name} from {source.Device.Name}"), transferCancellation!.Token); }
+                catch (Exception ex) { LogTransferFailure(source.Device,item.Name,ex); if(transferCancellation!.IsCancellationRequested) break; errors.Add($"Could not read {item.Name} from {source.Device.Name}: {ex.Message}"); WriteLog($"FAILED to stage {item.Name}; continuing sync - {ex.Message}"); continue; }
                 finally { CompleteTransferProgress(downloadId, source.File.Size, $"Read {item.Name}"); }
                 foreach (var destination in destinations)
                 {
+                    if (transferCancellation!.IsCancellationRequested) break;
                     var uploadId = $"upload:{destination.Id}:{item.Name}";
                     SetStatus(destination, $"Syncing {item.Name}...");
-                    try { await client.UploadAsync(destination, local, item.Name, Key, bytes => ReportTransferProgress(uploadId, bytes, $"{item.Name} to {destination.Name}")); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
-                    catch (Exception ex) { failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {ex.Message}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}"); }
+                    try { await client.UploadAsync(destination, local, item.Name, Key, bytes => ReportTransferProgress(uploadId, bytes, $"{item.Name} to {destination.Name}"), transferCancellation!.Token); RecordUploadedFile(destination, item.Name, source.File.Size); copied++; SetStatus(destination, "Synced"); WriteLog($"{destination.Name}: copied {item.Name} from {source.Device.Name}."); }
+                    catch (Exception ex) { LogTransferFailure(destination,item.Name,ex); if(transferCancellation!.IsCancellationRequested) break; failed.Add(destination.Id); errors.Add($"{destination.Name} / {item.Name}: {ex.Message}"); SetStatus(destination, "File failed; continuing sync..."); WriteLog($"{destination.Name}: FAILED to copy {item.Name}; continuing - {ex.Message}"); }
                     finally { CompleteTransferProgress(uploadId, source.File.Size, $"{item.Name} to {destination.Name}"); }
                 }
             }
@@ -981,6 +995,7 @@ public sealed class MainForm : Form
             foreach (var device in devices.Where(device => sessions.Any(session => session.Id == device.Id) && !failed.Contains(device.Id))) SetStatus(device, ReadyStatus(device));
             foreach (var device in devices.Where(device => failed.Contains(device.Id))) SetStatus(device, "Sync incomplete");
             EndTransferProgress(); SetBusy(false); RenderFileMatrix(); summary.Text = errors.Count == 0 ? $"Sync complete - {copied} copies" : $"Sync finished with {errors.Count} error(s)";
+            if (transferWasCancelled) summary.Text = $"Sync cancelled; {copied} confirmed copies retained";
             if (errors.Count > 0) MessageBox.Show(this, "Sync continued after individual failures.\n\n" + string.Join("\n", errors.Take(10)) + (errors.Count > 10 ? $"\n\n...and {errors.Count - 10} more." : ""), "Flying Thumb Sync", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         finally { try { Directory.Delete(temp, true); } catch { } EndTransferProgress(); SetBusy(false); }
@@ -1464,15 +1479,93 @@ public sealed class MainForm : Form
             MessageBox.Show(this, ex.Message, "USB Diagnostics Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
-        if (MessageBox.Show(this, "Unplug the Flying Thumb Drive. Hold its button while plugging it directly into this PC, keep holding until Windows detects it, then release the button and click OK.", "Flying Thumb USB Diagnostics", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
-        var port = await ChooseRecoveryPort(flasher, requirePositiveIdentification: true);
+        string? port = null;
+        try
+        {
+            SetBusy(true);
+            summary.Text = "Finding a Flying Thumb connected over USB...";
+            var normal = await RunUsbHelper(flasher, "--flyingthumb-find-usb");
+            WriteLog("USB identification: " + normal.Output.Trim());
+            var found = normal.Output.Split('\n').Select(line => line.Trim().Split('|')).Where(parts => parts.Length == 4 && parts[0] == "FTUSB" && parts[1] == "FOUND").ToArray();
+            if (found.Length > 0)
+            {
+                var selected = found.Length == 1 ? found[0][2] : Prompt.Choose("Choose the drive to diagnose", "USB Diagnostics", found.Select(parts => parts[2] + " - " + parts[3]).ToArray())?.Split(" - ")[0];
+                if (selected is null) return;
+                var target = found.Single(parts => parts[2] == selected);
+                summary.Text = "Restarting the drive into diagnostic recovery...";
+                var recovery = await RunUsbHelper(flasher, "--flyingthumb-usb-recovery", "--port", target[2], "--mac", target[3]);
+                if (recovery.ExitCode != 0 && recovery.Output.Contains("Cannot open USB volume", StringComparison.Ordinal))
+                {
+                    summary.Text = "Windows permission is needed to safely dismount the drive...";
+                    var elevated = new ProcessStartInfo(flasher) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+                    foreach (var argument in new[] { "--flyingthumb-usb-recovery", "--port", target[2], "--mac", target[3] }) elevated.ArgumentList.Add(argument);
+                    using var process = Process.Start(elevated) ?? throw new InvalidOperationException("Windows did not start the USB recovery helper");
+                    await process.WaitForExitAsync();
+                    recovery = (process.ExitCode, "The drive could not safely enter recovery. Close open files and finish Windows transfers, then retry diagnostics.");
+                }
+                if (recovery.ExitCode != 0) throw new InvalidOperationException(recovery.Output);
+                await Task.Delay(1500);
+                if (!await WaitForRecoveryPort(flasher, target[2], TimeSpan.FromSeconds(30), target[3])) throw new InvalidOperationException("The drive acknowledged recovery but did not reappear over USB.");
+                port = diagnosticRecoveryPort;
+            }
+            else port = await ChooseRecoveryPort(flasher, requirePositiveIdentification: true);
+        }
+        catch (Exception ex) { MessageBox.Show(this, ex.Message, "USB Diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+        finally { SetBusy(false); }
         if (string.IsNullOrWhiteSpace(port))
         {
-            MessageBox.Show(this, "No port positively answered as an ESP32-S3 recovery device.\n\nUnplug the Flying Thumb, hold its button before plugging it directly into this PC, keep holding for two seconds after insertion, release it, and run the diagnostic again.", "Flying Thumb Not in Recovery Mode", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "No Flying Thumb answered over USB. Connect it directly to this PC and close other programs using its USB port. Older firmware needs a one-time upgrade to support automatic USB diagnostics. An unresponsive application cannot accept a software recovery command.", "Flying Thumb Not Found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
         await RunUsbDiagnosticCore(flasher, port);
+    }
+
+    static async Task<(int ExitCode, string Output)> RunUsbHelper(string flasher, params string[] arguments)
+    {
+        var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("USB helper could not start");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch { process.Kill(true); throw; }
+        return (process.ExitCode, (await output) + (await error));
+    }
+
+    async Task<List<string>> TestDiagnosticNetworkFiles(string mac)
+    {
+        var results = new List<string>();
+        var id = "FT-" + string.Concat(mac.Split(':').Take(3).Reverse()).ToUpperInvariant();
+        var discovered = await DeviceDiscovery.FindAsync(TimeSpan.FromSeconds(4));
+        var target = discovered.FirstOrDefault(d => !d.IsSimulated && d.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+        if (target is null || (target.Claimed && string.IsNullOrEmpty(Key)))
+            return ["FTDIAG|0|NETWORK_FILE_TEST|SKIP|Drive not reachable on this PC's network, or management key unavailable"];
+        var folder = Path.Combine(Path.GetTempPath(), "FlyingThumb", "NetworkDiagnostic", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var name = ".FlyingThumb-diagnostic-" + Guid.NewGuid().ToString("N") + ".bin";
+        bool batch = false, attempted = false;
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            batch = await client.BeginFileBatchAsync(target, Key);
+            var payload = new byte[65536]; System.Security.Cryptography.RandomNumberGenerator.Fill(payload);
+            var source = Path.Combine(folder, "source.bin"); await File.WriteAllBytesAsync(source, payload);
+            attempted = true;
+            await client.UploadAsync(target, source, name, Key, cancellationToken: cancel.Token);
+            var readback = Path.Combine(folder, "readback.bin");
+            await client.DownloadAsync(target, name, readback, cancellationToken: cancel.Token);
+            results.Add("FTDIAG|0|NETWORK_FILE_TEST|" + ((await File.ReadAllBytesAsync(readback)).SequenceEqual(payload) ? "PASS" : "FAIL") + "|64 KiB upload/readback exact comparison");
+        }
+        catch (Exception ex) { results.Add("FTDIAG|0|NETWORK_FILE_TEST|FAIL|" + ex.Message); }
+        finally
+        {
+            if (attempted) try { await client.DeleteAsync(target, name, Key); } catch (Exception ex) { results.Add("FTDIAG|0|NETWORK_CLEANUP|FAIL|" + name + ": " + ex.Message); }
+            if (batch) try { await client.CommitFileBatchAsync(target, Key); } catch (Exception ex) { results.Add("FTDIAG|0|NETWORK_COMMIT|FAIL|" + ex.Message); }
+            try { Directory.Delete(folder, true); } catch { }
+        }
+        return results;
     }
 
     public async Task RunUsbDiagnosticWorker(string port, string reportPath, string expectedTargetMac)
@@ -1513,6 +1606,32 @@ public sealed class MainForm : Form
             expectedMac = DiagnosticReport.ExtractMac(connection.Output);
             if (expectedTargetMac is not null && expectedMac != expectedTargetMac.ToLowerInvariant())
                 throw new InvalidOperationException("Diagnostic target identity differs from the requested drive.");
+            var sessionsRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FlyingThumb", "DiagnosticBackups");
+            if (Directory.Exists(sessionsRoot))
+            {
+                foreach (var sessionFile in Directory.GetFiles(sessionsRoot, "session.json", SearchOption.AllDirectories).OrderDescending())
+                {
+                    var metadata = System.Text.Json.JsonSerializer.Deserialize<DiagnosticSession>(File.ReadAllText(sessionFile));
+                    if (metadata?.Mac != expectedMac || metadata.Phase == "Restored and verified") continue;
+                    var security = await RunFlasherDiagnostic(flasher, port, "get_security_info");
+                    if (security.ExitCode != 0) throw new InvalidOperationException("Cannot validate security before restoring interrupted diagnostic");
+                    DiagnosticReport.ValidateSecurity(security.Output);
+                    var interrupted = DiagnosticSession.Load(sessionFile); // Reject altered backups before writing.
+                    var folder = Path.GetDirectoryName(sessionFile)!;
+                    summary.Text = "Restoring an interrupted diagnostic before starting...";
+                    foreach (var item in new[] { (Offset: "0x10000", Name: "installed-app0.bin"), (Offset: "0xe000", Name: "boot-selection.bin"), (Offset: "0xff0000", Name: "original-coredump.bin") })
+                    {
+                        var path = Path.Combine(folder, item.Name);
+                        var write = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "write_flash", item.Offset, path);
+                        if (write.ExitCode != 0) throw new InvalidOperationException("Interrupted-session restoration failed: " + write.Output);
+                        var verify = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "verify_flash", item.Offset, path);
+                        if (verify.ExitCode != 0) throw new InvalidOperationException("Interrupted-session verification failed: " + verify.Output);
+                    }
+                    interrupted.Phase = "Restored and verified"; interrupted.Save(folder);
+                    report.Add("[PASS] Automatically restored interrupted diagnostic session");
+                    break;
+                }
+            }
 
             foreach (var test in new[]
             {
@@ -1648,11 +1767,24 @@ public sealed class MainForm : Form
             session.Phase = "Restored and verified"; session.Save(backupFolder);
             await StartApplicationWithoutUsbReset(flasher, port);
 
+            summary.Text = "Checking restored drive's Windows file access...";
+            await Task.Delay(4000);
+            try
+            {
+                var hostTest = await RunUsbHelper(flasher, "--flyingthumb-volume-test", "--mac", expectedMac!);
+                report.Add(hostTest.Output);
+                if (hostTest.ExitCode != 0) report.Add("[FAIL] Windows file-access test could not finish");
+            }
+            catch (Exception ex) { report.Add("[FAIL] Windows file-access test: " + ex.Message); }
+            summary.Text = "Checking restored drive's network file access...";
+            report.AddRange(await TestDiagnosticNetworkFiles(expectedMac!));
+
             foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
-            var conclusion = passed == 5
+            var hostFailed = report.Any(line => line.Contains("USB_STORAGE_HOST|FAIL") || line.Contains("USB_STORAGE_CLEANUP|FAIL") || line.Contains("[FAIL] Windows file-access") || line.Contains("NETWORK_FILE_TEST|FAIL") || line.Contains("NETWORK_CLEANUP|FAIL") || line.Contains("NETWORK_COMMIT|FAIL"));
+            var conclusion = passed == 5 && !hostFailed
                 ? (referenceDiffers ? "Hardware checks found no failures, but installed firmware differs from the reference image. See the full report when troubleshooting startup failures. Original firmware was restored and verified." : "The completed automatic checks found no failures. Skipped and unverified checks are listed separately; this does not certify every hardware circuit. Original firmware was restored and verified.")
                 : $"{passed} of 5 diagnostic groups passed. The report identifies the failing GPIO or hardware stage. Normal firmware was restored automatically.";
-            ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 5);
+            ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 5 && !hostFailed);
             summary.Text = $"USB diagnostics finished: {passed}/5 groups passed";
         }
         catch (Exception ex)
@@ -1780,7 +1912,7 @@ public sealed class MainForm : Form
             var exited = process.WaitForExitAsync();
             if (await Task.WhenAny(exited, Task.Delay(10000)) != exited) { process.Kill(true); await process.WaitForExitAsync(); return false; }
             await error;
-            return process.ExitCode == 0 && (await output).Contains("FLYINGTHUMB_HELPER_PROTOCOL=2", StringComparison.Ordinal);
+            return process.ExitCode == 0 && (await output).Contains("FLYINGTHUMB_HELPER_PROTOCOL=3", StringComparison.Ordinal);
         }
         if (await Supported(bundled)) return bundled;
         summary.Text = "Updating the USB diagnostic helper...";

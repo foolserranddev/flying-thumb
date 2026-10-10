@@ -52,6 +52,27 @@ try { await client.EnterUsbRecoveryAsync(drive, "test-shop-key"); throw new Exce
 catch (UnauthorizedAccessException) { }
 Console.WriteLine("PASS: authenticated recovery request, busy refusal and key rejection.");
 
+using var cancellationTransport = new HttpClient(new CancellationHandler());
+var cancellationClient = new FlyingThumbClient(cancellationTransport);
+var transferTest = Path.Combine(Path.GetTempPath(), "FlyingThumb-cancellation-" + Guid.NewGuid().ToString("N"));
+File.WriteAllBytes(transferTest, [1,2,3]);
+try {
+  using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+  try { await cancellationClient.UploadAsync(drive, transferTest, "cancel-test.bin", "", cancellationToken:cancel.Token); throw new Exception("Upload ignored cancellation"); }
+  catch (OperationCanceledException) { }
+  using var cancelDownload = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+  try { await cancellationClient.DownloadAsync(drive,"cancel-test.bin",transferTest + ".out",cancellationToken:cancelDownload.Token); throw new Exception("Download ignored cancellation"); }
+  catch (OperationCanceledException) { }
+} finally { File.Delete(transferTest); if(File.Exists(transferTest+".out"))File.Delete(transferTest+".out"); }
+Console.WriteLine("PASS: upload and download cancellation reach the HTTP operation.");
+
+sealed class CancellationHandler : HttpMessageHandler {
+  protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) {
+    await Task.Delay(Timeout.Infinite,cancellationToken);
+    return new HttpResponseMessage(System.Net.HttpStatusCode.OK);
+  }
+}
+
 sealed class RecoveryHandler : HttpMessageHandler {
   public int Calls;
   public System.Net.HttpStatusCode Status = System.Net.HttpStatusCode.Accepted;

@@ -9,7 +9,11 @@ public sealed class FlyingThumbClient
 {
     const string DemoMarker = ".flyingthumb-demo.json";
     readonly HttpClient http;
-    public FlyingThumbClient(HttpClient? transport = null) => http = transport ?? new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+    readonly HttpClient transferHttp;
+    public FlyingThumbClient(HttpClient? transport = null) {
+        http = transport ?? new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+        transferHttp = transport ?? new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+    }
 
     HttpRequestMessage Request(Device d,HttpMethod method,string path,string key,HttpContent? content=null){var request=new HttpRequestMessage(method,new Uri(d.BaseUri,path)){Content=content};if(!string.IsNullOrEmpty(key))request.Headers.TryAddWithoutValidation("X-FlyingThumb-Key",key);return request;}
     public static string NormalizeRemotePath(string name)
@@ -59,19 +63,21 @@ public sealed class FlyingThumbClient
         using var response=await http.SendAsync(Request(d,HttpMethod.Get,"api/list?recursive=1",key));await EnsureSuccessAsync(response,"Read file list");return await response.Content.ReadFromJsonAsync<List<RemoteFile>>()??[];
     }
 
-    public async Task DownloadAsync(Device d,string remoteName,string destinationPath,Action<long>? progress=null)
+    public async Task DownloadAsync(Device d,string remoteName,string destinationPath,Action<long>? progress=null,CancellationToken cancellationToken=default)
     {
         var remotePath=NormalizeRemotePath(remoteName);
         if(d.IsSimulated){File.Copy(DemoPath(d,remotePath),destinationPath,true);progress?.Invoke(new FileInfo(destinationPath).Length);return;}
-        using var response=await http.SendAsync(Request(d,HttpMethod.Get,"api/download?path="+Uri.EscapeDataString("/"+remotePath),""),HttpCompletionOption.ResponseHeadersRead);await EnsureSuccessAsync(response,$"Download {remotePath}");await using var input=await response.Content.ReadAsStreamAsync();await using var output=File.Create(destinationPath);
-        var buffer=new byte[81920];long copied=0;int read;while((read=await input.ReadAsync(buffer))>0){await output.WriteAsync(buffer.AsMemory(0,read));copied+=read;progress?.Invoke(copied);}
+        using var deadline=CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);deadline.CancelAfter(TimeSpan.FromMinutes(10));
+        using var response=await transferHttp.SendAsync(Request(d,HttpMethod.Get,"api/download?path="+Uri.EscapeDataString("/"+remotePath),""),HttpCompletionOption.ResponseHeadersRead,deadline.Token);await EnsureSuccessAsync(response,$"Download {remotePath}");await using var input=await response.Content.ReadAsStreamAsync(deadline.Token);await using var output=File.Create(destinationPath);
+        var buffer=new byte[81920];long copied=0;int read;while((read=await input.ReadAsync(buffer,deadline.Token))>0){await output.WriteAsync(buffer.AsMemory(0,read),deadline.Token);copied+=read;progress?.Invoke(copied);}
+        if(response.Content.Headers.ContentLength is long expected && copied!=expected)throw new IOException($"Incomplete download: {copied} of {expected} bytes");
     }
 
-    public async Task UploadAsync(Device d,string filePath,string remoteName,string key,Action<long>? progress=null)
+    public async Task UploadAsync(Device d,string filePath,string remoteName,string key,Action<long>? progress=null,CancellationToken cancellationToken=default)
     {
         var remotePath=NormalizeRemotePath(remoteName);
         if(d.IsSimulated){var destination=DemoPath(d,remotePath);Directory.CreateDirectory(Path.GetDirectoryName(destination)!);File.Copy(filePath,destination,true);progress?.Invoke(new FileInfo(filePath).Length);return;}
-        await using var stream=File.OpenRead(filePath);await using var progressStream=new ProgressReadStream(stream,progress);using var content=new MultipartFormDataContent();using var file=new StreamContent(progressStream);AddFilePart(content,file,"file",Path.GetFileName(filePath));using var response=await http.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0&path="+Uri.EscapeDataString("/"+remotePath),key,content));await EnsureSuccessAsync(response,$"Upload {remotePath}");
+        await using var stream=File.OpenRead(filePath);await using var progressStream=new ProgressReadStream(stream,progress);using var content=new MultipartFormDataContent();using var file=new StreamContent(progressStream);AddFilePart(content,file,"file",Path.GetFileName(filePath));using var response=await transferHttp.SendAsync(Request(d,HttpMethod.Post,"upload?restart=0&path="+Uri.EscapeDataString("/"+remotePath),key,content),cancellationToken);await EnsureSuccessAsync(response,$"Upload {remotePath}");
     }
 
     sealed class ProgressReadStream(Stream inner,Action<long>? progress):Stream
