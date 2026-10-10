@@ -10,13 +10,13 @@
 #include "fileserver.h"
 #include "ota_health.h"
 #include "usb_disk.h"
+#include "esp32-hal-tinyusb.h"
 
 USBMSC msc;
 namespace {
 volatile uint32_t lastRead = 0, lastWrite = 0;
 uint32_t pressedAt = 0;
 bool resetHandled = false;
-bool wakeOnlyPress = false;
 bool usbDiskReady = false, usbUpdateActive = false, usbManagedMode = false;
 volatile bool usbWritesBlocked = false;
 BYTE rawDrive = FF_DRV_NOT_USED;
@@ -109,19 +109,31 @@ void startUsbDisk() {
 }
 void serviceButton() {
   const bool down = digitalRead(PIN_BUTTON) == LOW;
-  if (down && !pressedAt) { pressedAt = millis(); resetHandled = false; wakeOnlyPress = wakeDisplay(); }
+  if (down && !pressedAt) { pressedAt = millis(); resetHandled = false; wakeDisplay(); }
   if (down && !resetHandled && millis() - pressedAt >= RESET_HOLD_MS) {
     resetHandled = true; setDeviceStatus(DeviceStatus::SetupAccessPoint); displayMessage("RESETTING", "WiFi cleared", "Setup mode");
     clearNetworkSettings(); delay(800); ESP.restart();
   }
   if (!down && pressedAt) {
     const uint32_t duration = millis() - pressedAt; pressedAt = 0;
-    if (!resetHandled && !wakeOnlyPress && duration >= DEBOUNCE_MS && duration < RESET_HOLD_MS) {
+    if (!resetHandled && duration >= DEBOUNCE_MS && duration < RESET_HOLD_MS) {
       setDeviceStatus(DeviceStatus::WpsSearching); displayMessage("WPS STARTING", "Please wait", ""); beginWpsPairing();
     }
-    wakeOnlyPress = false;
   }
 }
+}
+
+bool prepareUsbRecovery() {
+  if (usbUpdateActive || (lastWrite && millis() - lastWrite < 2000)) return false;
+  usbWritesBlocked = true;
+  if (usbDiskReady) { msc.isWritable(false); msc.mediaPresent(false); }
+  return true;
+}
+
+void enterUsbRecovery() {
+  displayMessage("USB RECOVERY", "Install via Manager", "");
+  SD_MMC.end();
+  usb_persist_restart(RESTART_BOOTLOADER);
 }
 
 bool beginUsbFileUpdate() {

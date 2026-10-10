@@ -98,4 +98,10 @@ Uploads are transactional: data is written to a hidden temporary file, verified,
 
 The LED reports the network and fault states described above.
 
+## USB diagnostics and remote recovery
+
+Choose **Drives > Diagnose a Drive via USB** for ROM identity/flash/security checks followed by a temporary hardware tester. It checks allocated RAM, both CPU cores, timers, temperature, SHA-256/AES vectors, internal UART loopback, SPI/PWM/pulse feedback, flash/NVS, LED signals, Wi-Fi and microSD geometry/file I/O. The Manager preserves original application sectors and boot selection, retrieves the report, restores and verifies those bytes, then restarts normal firmware. Reports distinguish failures, skipped prerequisites, unverified physical observations and incomplete execution. Full optical, RF, power-rail and fixture-dependent measurements cannot be certified by firmware alone.
+
+**Drives > Restart Selected Drive into USB Recovery** requests recovery over the existing Wi-Fi connection. It requires a configured shop key and refuses active transfers. Safely eject USB storage first, and connect USB to the PC that will perform diagnostics or flashing. Wi-Fi stops in ROM recovery. The physical button is still needed when normal firmware or Wi-Fi cannot respond.
+
 The firmware uses the supported 16 MB flash, no-PSRAM hardware profile and the maintained PIOArduino ESP32 platform. Its pin assignments follow the board vendor's official documentation. The original USB mass-storage proof of concept came from ThingPulse's `esp32-s3-pendrive-wireless-usb-disk` project.

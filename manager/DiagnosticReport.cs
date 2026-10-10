@@ -4,6 +4,13 @@ public sealed record DiagnosticResult(string Test, string Status, string Evidenc
 
 public static class DiagnosticReport
 {
+    public static void ValidateFlashCapacity(string output)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(output, @"Detected flash size:\s*(\d+)\s*(KB|MB)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success || !long.TryParse(match.Groups[1].Value, out var size)) throw new InvalidOperationException("The flash capacity could not be established; active diagnostics were not loaded.");
+        var bytes = size * (match.Groups[2].Value.Equals("MB", StringComparison.OrdinalIgnoreCase) ? 1024 * 1024 : 1024);
+        if (bytes < 16L * 1024 * 1024) throw new InvalidOperationException("This diagnostic layout requires at least 16 MB onboard flash. No firmware was changed.");
+    }
     public static void ValidateSecurity(string output)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(output, @"Secure Boot:\s*Disabled", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
@@ -13,7 +20,7 @@ public static class DiagnosticReport
     public static IReadOnlyList<DiagnosticResult> AssessActive(string report)
     {
         var results = Parse(report).ToList();
-        var required = new[] { "CHIP", "HEAP_BEFORE", "INTERNAL_RAM", "PSRAM", "TIMER", "RNG", "DIE_TEMPERATURE", "CPU_CORE0", "CPU_CORE1", "SHA256_KNOWN_VECTOR", "FLASH_SCRATCH", "BLE_CONTROLLER", "GPIO_LEVELS / LED_DATA_GPIO40", "GPIO_LEVELS / LED_CLOCK_GPIO39", "GPIO_CROSS_SHORT / DATA40_TO_CLOCK39", "GPIO_CROSS_SHORT / CLOCK39_TO_DATA40", "LED_INIT_COMPLETE", "WIFI_SCAN", "WIFI_SAVED_CONNECTION", "WIFI_AP", "SD_INIT", "SD_ONE_BIT", "HEAP_AFTER" };
+        var required = new[] { "CHIP", "HEAP_BEFORE", "INTERNAL_RAM", "PSRAM", "TIMER", "RNG", "DIE_TEMPERATURE", "CPU_CORE0", "CPU_CORE1", "SHA256_KNOWN_VECTOR", "AES_KNOWN_VECTOR", "UART1_INTERNAL", "UART2_INTERNAL", "SPI2_FEEDBACK", "SPI3_FEEDBACK", "PWM_FEEDBACK", "RMT_PULSE_CAPTURE", "FLASH_SCRATCH", "BLE_CONTROLLER", "GPIO_LEVELS / LED_DATA_GPIO40", "GPIO_LEVELS / LED_CLOCK_GPIO39", "GPIO_CROSS_SHORT / DATA40_TO_CLOCK39", "GPIO_CROSS_SHORT / CLOCK39_TO_DATA40", "LED_INIT_COMPLETE", "WIFI_SCAN", "WIFI_SAVED_CONNECTION", "WIFI_AP", "SD_INIT", "SD_ONE_BIT", "HEAP_AFTER" };
         foreach (var name in required)
             if (!results.Any(result => result.Test == name)) results.Add(new(name, "INCOMPLETE", "No result was returned for this required stage."));
         if (!report.Split('\n').Any(line => line.TrimEnd().EndsWith("|SCHEMA|2", StringComparison.Ordinal))) results.Add(new("REPORT_SCHEMA", "INCOMPLETE", "Expected schema 2."));
@@ -56,6 +63,17 @@ public static class DiagnosticReport
         var results = new List<DiagnosticResult>();
         foreach (var line in report.Split('\n'))
         {
+            if (line.StartsWith('['))
+            {
+                var end = line.IndexOf(']');
+                if (end > 1)
+                {
+                    var romStatus = line[1..end];
+                    if (romStatus is "PASS" or "FAIL" or "SKIPPED" or "DIFFERENT")
+                        results.Add(new(line[(end + 1)..].Trim(), romStatus == "SKIPPED" ? "SKIP" : romStatus, "See full report for ROM/helper details."));
+                }
+                continue;
+            }
             var fields = line.Trim().Split('|');
             if (fields.Length < 4 || fields[0] != "FTDIAG") continue;
             var statusIndex = Array.FindIndex(fields, 3, field => field is "PASS" or "FAIL" or "SKIP" or "UNVERIFIED" or "INCOMPLETE" || field.StartsWith("UNVERIFIED_", StringComparison.Ordinal));

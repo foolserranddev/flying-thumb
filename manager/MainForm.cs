@@ -44,7 +44,9 @@ public sealed class MainForm : Form
     int transferCompletedOperations;
     int transferTotalOperations;
 
-    public MainForm()
+    string? automatedDiagnosticReport;
+    public bool AutomatedDiagnosticSucceeded { get; private set; }
+    public MainForm(bool diagnosticWorker = false)
     {
         Text = "Flying Thumb Manager";
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -135,8 +137,8 @@ public sealed class MainForm : Form
         DragDrop += async (_, e) => { if (e.Data?.GetData(DataFormats.FileDrop) is string[] paths) await AddPaths(paths); };
         split.SizeChanged += (_, _) => ApplyResponsiveSplit();
         setupNetworkTimer.Tick += (_, _) => CheckForSetupNetwork();
-        Shown += async (_, _) => { WriteLog($"Flying Thumb Manager {UpdateService.CurrentManagerVersion} started."); await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
-        FormClosing += (_, _) => ManagerSettings.SaveWindowSize(WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size, WindowState == FormWindowState.Maximized);
+        Shown += async (_, _) => { if (diagnosticWorker) return; WriteLog($"Flying Thumb Manager {UpdateService.CurrentManagerVersion} started."); await RefreshDevices(); ApplyResponsiveSplit(); setupNetworkTimer.Start(); CheckForSetupNetwork(); };
+        FormClosing += (_, _) => { if (!diagnosticWorker) ManagerSettings.SaveWindowSize(WindowState == FormWindowState.Normal ? Size : RestoreBounds.Size, WindowState == FormWindowState.Maximized); };
         FormClosed += (_, _) => setupNetworkTimer.Stop();
     }
 
@@ -258,6 +260,7 @@ public sealed class MainForm : Form
         drives.DropDownItems.Add(new ToolStripSeparator());
         drives.DropDownItems.Add(Item("Install / Recover a Drive via USB...", RecoverUsb));
         drives.DropDownItems.Add(Item("Diagnose a Drive via USB...", DiagnoseUsb));
+        drives.DropDownItems.Add(Item("Restart Selected Drive into USB Recovery...", EnterNetworkUsbRecovery));
         drives.DropDownItems.Add(Item("Restore an Interrupted Diagnostic...", RestoreDiagnostic));
         drives.DropDownItems.Add(Item("Test Selected Drive's Network File Access...", DiagnoseNetworkFiles));
         drives.DropDownItems.Add(Item("Test Drive's Windows File Access...", DiagnoseWindowsFiles));
@@ -1160,6 +1163,16 @@ public sealed class MainForm : Form
         if (succeeded) { SetBusy(true); await WaitForReconnectAndRefresh(targets, "Firmware update"); }
     }
 
+    async void EnterNetworkUsbRecovery(object? sender, EventArgs e)
+    {
+        if (deviceGrid.CurrentRow?.DataBoundItem is not Device device || device.IsSimulated) { MessageBox.Show(this, "Choose a physical drive first.", "USB Recovery"); return; }
+        if (!device.UsbRecoveryAvailable) { MessageBox.Show(this, "Update this drive's firmware to enable remote USB recovery.", "USB Recovery"); return; }
+        if (!device.Claimed) { MessageBox.Show(this, "Set a shop management key on the drive first.", "USB Recovery"); return; }
+        if (!EnsureManagementKey([device])) return;
+        if (MessageBox.Show(this, "Safely eject the drive from its USB host first.\n\nThis stops Wi-Fi and USB storage until the drive is restarted. For installation or diagnostics, its USB plug must be connected to this PC.\n\nRestart into USB recovery?", "USB Recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
+        await RunForDevices([device], async item => { await client.EnterUsbRecoveryAsync(item, Key); return "USB recovery requested"; });
+    }
+
     async void RenameDevice(object? sender, EventArgs e)
     {
         if (deviceGrid.CurrentRow?.DataBoundItem is not Device d) { MessageBox.Show("Choose one drive first."); return; }
@@ -1206,6 +1219,7 @@ public sealed class MainForm : Form
 
     async Task<(int ExitCode, string Output)> RunFlasherCommand(string flasher, string port, string before, string after, TimeSpan timeout, params string[] command)
     {
+        if (automatedDiagnosticReport is not null) File.AppendAllText(automatedDiagnosticReport + ".progress", $"{DateTime.UtcNow:O} START {port} {string.Join(' ', command)}{Environment.NewLine}");
         var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var argument in new[] { "--chip", "esp32s3", "--port", port, "--before", before, "--after", after }.Concat(command)) start.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = start };
@@ -1219,7 +1233,9 @@ public sealed class MainForm : Form
             await process.WaitForExitAsync();
             return (-1, "Diagnostic timed out.");
         }
-        return (process.ExitCode, ((await outputTask) + (await errorTask)).Trim());
+        var capturedOutput = ((await outputTask) + (await errorTask)).Trim();
+        if (automatedDiagnosticReport is not null) File.AppendAllText(automatedDiagnosticReport + ".progress", $"{DateTime.UtcNow:O} EXIT {process.ExitCode} {capturedOutput[^Math.Min(300, capturedOutput.Length)..]}{Environment.NewLine}");
+        return (process.ExitCode, capturedOutput);
     }
 
     string? diagnosticRecoveryPort;
@@ -1232,7 +1248,7 @@ public sealed class MainForm : Form
             await Task.Delay(1500);
             foreach (var candidate in new[] { port }.Concat(SerialPorts()).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-            var probe = await RunFlasherCommand(flasher, candidate, "no_reset", "no_reset", TimeSpan.FromSeconds(5), "chip_id");
+            var probe = await RunFlasherCommand(flasher, candidate, "no_reset", "no_reset", TimeSpan.FromSeconds(15), "chip_id");
             if (probe.ExitCode == 0 && probe.Output.Contains("ESP32-S3", StringComparison.OrdinalIgnoreCase))
             {
                 if (expectedMac is not null && DiagnosticReport.ExtractMac(probe.Output) != expectedMac)
@@ -1282,6 +1298,12 @@ public sealed class MainForm : Form
 
     void ShowDiagnosticReport(string conclusion, string reportText, bool allPassed)
     {
+        if (automatedDiagnosticReport is not null)
+        {
+            File.WriteAllText(automatedDiagnosticReport, conclusion + Environment.NewLine + reportText);
+            AutomatedDiagnosticSucceeded = allPassed;
+            return;
+        }
         using var dialog = new Form
         {
             Text = "Flying Thumb USB Diagnostic Report",
@@ -1412,7 +1434,7 @@ public sealed class MainForm : Form
         {
             var session = DiagnosticSession.Load(picker.FileName);
             var folder = Path.GetDirectoryName(picker.FileName)!;
-            var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
+            var flasher = await ResolveDiagnosticHelper();
             var port = await ChooseRecoveryPort(flasher, true) ?? throw new InvalidOperationException("The drive must be available in recovery mode.");
             if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(10), session.Mac)) throw new InvalidOperationException("The original drive is not answering.");
             port = diagnosticRecoveryPort ?? port;
@@ -1435,10 +1457,11 @@ public sealed class MainForm : Form
 
     async void DiagnoseUsb(object? sender, EventArgs e)
     {
-        var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
-        if (!File.Exists(flasher))
+        string flasher;
+        try { flasher = await ResolveDiagnosticHelper(); }
+        catch (Exception ex)
         {
-            MessageBox.Show(this, "The USB diagnostic helper is missing. Download the complete Manager package or run the Manager while connected to the internet once.", "USB Diagnostics Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, ex.Message, "USB Diagnostics Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
         if (MessageBox.Show(this, "Unplug the Flying Thumb Drive. Hold its button while plugging it directly into this PC, keep holding until Windows detects it, then release the button and click OK.", "Flying Thumb USB Diagnostics", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return;
@@ -1449,6 +1472,17 @@ public sealed class MainForm : Form
             return;
         }
 
+        await RunUsbDiagnosticCore(flasher, port);
+    }
+
+    public async Task RunUsbDiagnosticWorker(string port, string reportPath, string expectedTargetMac)
+    {
+        automatedDiagnosticReport = reportPath;
+        await RunUsbDiagnosticCore(await ResolveDiagnosticHelper(), port, expectedTargetMac);
+    }
+
+    async Task RunUsbDiagnosticCore(string flasher, string port, string? expectedTargetMac = null)
+    {
         SetBusy(true); tabs.SelectedIndex = 1; summary.Text = $"Diagnosing Flying Thumb on {port}...";
         var report = new List<string> { $"Flying Thumb USB diagnostic", $"Time: {DateTime.Now:F}", $"Recovery port: {port}", "" };
         var passed = 0;
@@ -1459,6 +1493,8 @@ public sealed class MainForm : Form
         string? diagnosticError = null;
         string? expectedMac = null;
         DiagnosticSession? session = null;
+        bool matchedApplication = false;
+        bool referenceDiffers = false;
         try
         {
             var connection = await RunFlasherDiagnostic(flasher, port, "chip_id");
@@ -1475,6 +1511,8 @@ public sealed class MainForm : Form
             }
             passed++;
             expectedMac = DiagnosticReport.ExtractMac(connection.Output);
+            if (expectedTargetMac is not null && expectedMac != expectedTargetMac.ToLowerInvariant())
+                throw new InvalidOperationException("Diagnostic target identity differs from the requested drive.");
 
             foreach (var test in new[]
             {
@@ -1492,6 +1530,11 @@ public sealed class MainForm : Form
                     if (result.ExitCode != 0) throw new InvalidOperationException("The security state could not be read; active diagnostics were not loaded.");
                     DiagnosticReport.ValidateSecurity(result.Output);
                 }
+                if (test.Name == "Onboard flash")
+                {
+                    if (result.ExitCode != 0) throw new InvalidOperationException("The flash capacity could not be read; active diagnostics were not loaded.");
+                    DiagnosticReport.ValidateFlashCapacity(result.Output);
+                }
             }
 
             (string Path, string Version, string Source) application;
@@ -1507,9 +1550,12 @@ public sealed class MainForm : Form
                 normalApplication = application.Path;
                 WriteLog($"USB diagnostic: comparing immutable application bytes with firmware {application.Version}...");
                 var result = await RunFlasherDiagnostic(flasher, port, "verify_flash", "0x10000", application.Path);
-                report.Add($"[{(result.ExitCode == 0 ? "PASS" : "FAIL")}] Installed application matches {application.Version}");
+                referenceDiffers = result.ExitCode != 0 && result.Output.Contains("digest mismatch", StringComparison.OrdinalIgnoreCase);
+                report.Add($"[{(result.ExitCode == 0 ? "PASS" : referenceDiffers ? "DIFFERENT" : "FAIL")}] Installed application comparison with {application.Version}");
                 report.Add(result.Output); report.Add("");
-                if (result.ExitCode == 0) passed++;
+                matchedApplication = result.ExitCode == 0;
+                if (result.ExitCode == 0 || referenceDiffers) passed++;
+                if (referenceDiffers) report.Add("A different firmware version or damaged application can cause this difference; it does not by itself establish a hardware fault. Original bytes will be preserved.");
             }
             if (normalApplication.Length == 0)
                 throw new InvalidOperationException("The normal application image is unavailable, so an active test cannot safely replace and restore it.");
@@ -1530,6 +1576,12 @@ public sealed class MainForm : Form
             if (touchedBytes <= 0 || touchedBytes > 0x640000) throw new InvalidOperationException("The diagnostic image does not fit the installed application partition.");
             foreach (var backup in new[] { (Offset: "0x10000", Size: "0x" + touchedBytes.ToString("x"), Path: installedBackup), (Offset: "0xe000", Size: "0x2000", Path: bootSelectionBackup), (Offset: "0xff0000", Size: "0x10000", Path: Path.Combine(backupFolder, "original-coredump.bin")) })
             {
+                if (backup.Offset == "0x10000" && matchedApplication && new FileInfo(application.Path).Length >= touchedBytes)
+                {
+                    File.WriteAllBytes(backup.Path, File.ReadAllBytes(application.Path).AsSpan(0, checked((int)touchedBytes)).ToArray());
+                    WriteLog("Preserved exact application sectors from the independently verified image.");
+                    continue;
+                }
                 var saved = await RunFlasherCommand(flasher, port, "no_reset", "no_reset", TimeSpan.FromMinutes(3), "read_flash", backup.Offset, backup.Size, backup.Path);
                 if (saved.ExitCode != 0 || !File.Exists(backup.Path)) throw new InvalidOperationException("Could not preserve installed firmware before testing. " + saved.Output);
             }
@@ -1553,6 +1605,10 @@ public sealed class MainForm : Form
             summary.Text = "Testing LED pins, Wi-Fi, microSD, and button...";
             WriteLog("USB diagnostic: running GPIO level/short, LED command, Wi-Fi, microSD, and button checks...");
             await StartApplicationWithoutUsbReset(flasher, port);
+            // Opening a serial port changes USB line state. Let the bounded test finish
+            // before probing ROM, including its optional 15-second network connection test.
+            summary.Text = "Waiting for the hardware test to complete...";
+            await Task.Delay(TimeSpan.FromSeconds(30));
             if (!await WaitForRecoveryPort(flasher, port, TimeSpan.FromSeconds(150), expectedMac))
                 throw new TimeoutException("The active hardware test did not return to USB recovery mode within 150 seconds.");
             port = diagnosticRecoveryPort ?? port;
@@ -1594,7 +1650,7 @@ public sealed class MainForm : Form
 
             foreach (var line in report) if (!string.IsNullOrWhiteSpace(line)) WriteLog(line);
             var conclusion = passed == 5
-                ? "The completed automatic checks found no failures. Skipped and unverified checks are listed separately; this does not certify every hardware circuit. Original firmware was restored and verified."
+                ? (referenceDiffers ? "Hardware checks found no failures, but installed firmware differs from the reference image. See the full report when troubleshooting startup failures. Original firmware was restored and verified." : "The completed automatic checks found no failures. Skipped and unverified checks are listed separately; this does not certify every hardware circuit. Original firmware was restored and verified.")
                 : $"{passed} of 5 diagnostic groups passed. The report identifies the failing GPIO or hardware stage. Normal firmware was restored automatically.";
             ShowDiagnosticReport(conclusion, string.Join(Environment.NewLine, report), passed == 5);
             summary.Text = $"USB diagnostics finished: {passed}/5 groups passed";
@@ -1710,11 +1766,35 @@ public sealed class MainForm : Form
         }
     }
 
+    async Task<string> ResolveDiagnosticHelper()
+    {
+        var bundled = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
+        async Task<bool> Supported(string path)
+        {
+            if (!File.Exists(path)) return false;
+            var start = new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+            start.ArgumentList.Add("--flyingthumb-helper-version");
+            using var process = Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEndAsync();
+            var exited = process.WaitForExitAsync();
+            if (await Task.WhenAny(exited, Task.Delay(10000)) != exited) { process.Kill(true); await process.WaitForExitAsync(); return false; }
+            await error;
+            return process.ExitCode == 0 && (await output).Contains("FLYINGTHUMB_HELPER_PROTOCOL=2", StringComparison.Ordinal);
+        }
+        if (await Supported(bundled)) return bundled;
+        summary.Text = "Updating the USB diagnostic helper...";
+        var manifest = await UpdateService.GetLatestAsync();
+        var downloaded = await UpdateService.DownloadVerifiedAsync(manifest.Flasher, "FlyingThumbEsptool.exe");
+        if (!await Supported(downloaded)) throw new InvalidOperationException("The USB diagnostic helper needs a newer Manager package. Install the complete current package or check for updates.");
+        try { File.Copy(downloaded, bundled, true); return bundled; } catch { return downloaded; }
+    }
+
     async Task<(string Path, string Version, string Source)> ResolveDiagnosticImage()
     {
         const string imageName = "FlyingThumb-v2-hardware-diagnostic.bin";
         var localImage = Path.Combine(AppContext.BaseDirectory, imageName);
-        if (File.Exists(localImage)) return (localImage, UpdateService.CurrentManagerVersion, "bundled diagnostic matched to this Manager");
+        if (File.Exists(localImage) && System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(localImage)).Contains("HWCDC_V1", StringComparison.Ordinal)) return (localImage, UpdateService.CurrentManagerVersion, "bundled diagnostic matched to this Manager");
         try
         {
             summary.Text = "Downloading the active hardware test...";

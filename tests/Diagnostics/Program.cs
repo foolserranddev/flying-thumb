@@ -5,8 +5,12 @@ void Require(bool condition, string name) { if (!condition) throw new Exception(
 void Reject(Action action, string name) { try { action(); } catch (InvalidOperationException) { return; } throw new Exception(name); }
 var results = DiagnosticReport.Parse("FTDIAG|0|BOOT|v2\nFTDIAG|1|RAM|FAIL|address mismatch\nFTDIAG|2|GPIO|DATA40|PASS|HIGH=1\nFTDIAG|3|PSRAM|SKIP|not enabled\nFTDIAG|4|LED|UNVERIFIED_NO_LIGHT_SENSOR\ntruncated|PASS");
 Require(results.Count == 4 && results[0].Status == "FAIL" && results[1].Test == "GPIO / DATA40" && results[2].Status == "SKIP" && results[3].Status == "UNVERIFIED", "Result statuses must retain failures, skips and physical limits");
+Require(DiagnosticReport.Parse("[DIFFERENT] Installed firmware comparison").Single().Status == "DIFFERENT", "A reference mismatch must not become a hardware failure");
 Require(DiagnosticReport.AssessActive("FTDIAG|0|RAM|PASS").Any(result => result.Status == "INCOMPLETE"), "A passing fragment must never represent a full passing suite");
 DiagnosticReport.ValidateSecurity("Secure Boot: Disabled\nFlash Encryption: Disabled");
+DiagnosticReport.ValidateFlashCapacity("Detected flash size: 16MB");
+Reject(() => DiagnosticReport.ValidateFlashCapacity("Detected flash size: 8MB"), "Flash smaller than the diagnostic layout must be rejected");
+Reject(() => DiagnosticReport.ValidateFlashCapacity("Manufacturer: ef"), "Unknown flash capacity must be rejected");
 Reject(() => DiagnosticReport.ValidateSecurity("Secure Boot: Enabled\nFlash Encryption: Disabled"), "Signed firmware requirement must prevent diagnostic replacement");
 Reject(() => DiagnosticReport.ValidateSecurity("Secure Boot: Disabled\nFlash Encryption: Enabled"), "Encrypted flash must prevent diagnostic replacement");
 Reject(() => DiagnosticReport.ValidateSecurity("Security Information:"), "Unknown security state must prevent diagnostic replacement");
@@ -33,3 +37,27 @@ try {
   Reject(() => DiagnosticSession.Load(Path.Combine(folder, "session.json")), "Modified recovery image must be rejected");
   Console.WriteLine("PASS: durable recovery identity and altered-backup rejection.");
 } finally { Directory.Delete(folder, true); }
+
+using var handler = new RecoveryHandler();
+using var transport = new HttpClient(handler);
+var client = new FlyingThumbClient(transport);
+var drive = new Device { Ip = "127.0.0.1", Claimed = true };
+await client.EnterUsbRecoveryAsync(drive, "test-shop-key");
+Require(handler.Calls == 1, "Recovery request reaches the expected endpoint");
+handler.Status = System.Net.HttpStatusCode.Conflict;
+try { await client.EnterUsbRecoveryAsync(drive, "test-shop-key"); throw new Exception("Busy response was ignored"); }
+catch (InvalidOperationException ex) { Require(ex.Message.Contains("HTTP 409"), "Busy reason reaches the user"); }
+handler.Status = System.Net.HttpStatusCode.Unauthorized;
+try { await client.EnterUsbRecoveryAsync(drive, "test-shop-key"); throw new Exception("Key rejection was ignored"); }
+catch (UnauthorizedAccessException) { }
+Console.WriteLine("PASS: authenticated recovery request, busy refusal and key rejection.");
+
+sealed class RecoveryHandler : HttpMessageHandler {
+  public int Calls;
+  public System.Net.HttpStatusCode Status = System.Net.HttpStatusCode.Accepted;
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+    if (request.Method != HttpMethod.Post || request.RequestUri?.AbsolutePath != "/api/usb-recovery" || !request.Headers.TryGetValues("X-FlyingThumb-Key", out var values) || values.Single() != "test-shop-key") throw new Exception("Incorrect recovery protocol");
+    Calls++;
+    return Task.FromResult(new HttpResponseMessage(Status) { Content = new StringContent("{\"error\":\"USB writes are active\"}") });
+  }
+}

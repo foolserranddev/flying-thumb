@@ -11,6 +11,16 @@
 #include <driver/temperature_sensor.h>
 #include <Preferences.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/aes.h>
+#include <driver/uart.h>
+#include <driver/spi_master.h>
+#include <driver/ledc.h>
+#include <driver/gpio.h>
+#include <soc/spi_periph.h>
+#include <esp_rom_gpio.h>
+#include <driver/rmt_tx.h>
+#include <driver/rmt_rx.h>
+#include <driver/rmt_encoder.h>
 #include "esp32-hal-bt.h"
 #include "esp32-hal-alloc-ble-mem.h"
 #include "esp32-hal-tinyusb.h"
@@ -175,6 +185,107 @@ void testCoresAndCrypto() {
   uint8_t digest[32];
   bool ok = mbedtls_sha256(reinterpret_cast<const uint8_t *>("abc"), 3, digest, 0) == 0 && memcmp(digest, expected, 32) == 0;
   checkpoint("SHA256_KNOWN_VECTOR", ok ? "PASS|abc known digest" : "FAIL");
+  const uint8_t key[16] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+  const uint8_t plain[16] = {0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff};
+  const uint8_t cipher[16] = {0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a};
+  uint8_t encrypted[16], decrypted[16]; mbedtls_aes_context aes; mbedtls_aes_init(&aes);
+  bool aesOk = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 && mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, plain, encrypted) == 0 && memcmp(encrypted, cipher, 16) == 0;
+  aesOk &= mbedtls_aes_setkey_dec(&aes, key, 128) == 0 && mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, cipher, decrypted) == 0 && memcmp(decrypted, plain, 16) == 0;
+  mbedtls_aes_free(&aes);
+  checkpoint("AES_KNOWN_VECTOR", aesOk ? "PASS|AES-128 encrypt/decrypt known vector" : "FAIL");
+}
+
+void testUart(uart_port_t port, const char *name) {
+  if (uart_is_driver_installed(port)) { checkpoint(name, "SKIP|Controller already owned; existing console preserved"); return; }
+  uart_config_t config = {}; config.baud_rate = 115200; config.data_bits = UART_DATA_8_BITS;
+  config.parity = UART_PARITY_DISABLE; config.stop_bits = UART_STOP_BITS_1; config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE; config.source_clk = UART_SCLK_DEFAULT;
+  bool installed = uart_driver_install(port, 1024, 0, 0, nullptr, 0) == ESP_OK;
+  bool ok = installed && uart_param_config(port, &config) == ESP_OK && uart_set_loop_back(port, true) == ESP_OK;
+  const uint8_t payload[] = {0,0xff,0x55,0xaa,1,2,4,8,16,32,64,128}; uint8_t received[sizeof(payload)] = {};
+  if (ok) { uart_flush_input(port); ok = uart_write_bytes(port, payload, sizeof(payload)) == sizeof(payload) && uart_read_bytes(port, received, sizeof(received), pdMS_TO_TICKS(250)) == sizeof(received) && memcmp(payload, received, sizeof(payload)) == 0; }
+  if (installed) { uart_set_loop_back(port, false); uart_driver_delete(port); }
+  checkpoint(name, ok ? "PASS|Internal TX/RX FIFO loopback; no GPIO routing changed" : "FAIL|Internal loopback failed");
+}
+
+void testSpi(spi_host_device_t host, int dataPin, int clockPin, const char *name) {
+  spi_bus_config_t bus = {}; bus.mosi_io_num = dataPin; bus.miso_io_num = dataPin; bus.sclk_io_num = clockPin; bus.quadwp_io_num = -1; bus.quadhd_io_num = -1; bus.max_transfer_sz = 32;
+  bool installed = spi_bus_initialize(host, &bus, SPI_DMA_DISABLED) == ESP_OK;
+  spi_device_handle_t device = nullptr; spi_device_interface_config_t config = {}; config.clock_speed_hz = 1000000; config.spics_io_num = -1; config.queue_size = 1;
+  bool ok = installed && spi_bus_add_device(host, &config, &device) == ESP_OK;
+  alignas(4) uint8_t payload[32], received[32] = {}; for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (i * 37) ^ 0xa5;
+  if (ok) {
+    gpio_set_direction(static_cast<gpio_num_t>(dataPin), GPIO_MODE_INPUT_OUTPUT);
+    // gpio_set_direction enables output but also replaces peripheral routing.
+    // Restore MOSI after enabling same-pad feedback; SPI's MISO route is explicit.
+    esp_rom_gpio_connect_out_signal(dataPin, spi_periph_signal[host].spid_out, false, false);
+    esp_rom_gpio_connect_in_signal(dataPin, spi_periph_signal[host].spiq_in, false);
+    spi_transaction_t transaction = {}; transaction.length = sizeof(payload) * 8; transaction.tx_buffer = payload; transaction.rx_buffer = received;
+    ok = spi_device_polling_transmit(device, &transaction) == ESP_OK && memcmp(payload, received, sizeof(payload)) == 0;
+  }
+  if (device) spi_bus_remove_device(device); if (installed) spi_bus_free(host);
+  gpio_reset_pin(static_cast<gpio_num_t>(dataPin)); gpio_reset_pin(static_cast<gpio_num_t>(clockPin));
+  checkpoint(name, ok ? "PASS|Same-pad MOSI/MISO feedback on known display/LED nets" : "FAIL|SPI feedback failed");
+}
+
+void testPwm() {
+  pinMode(PIN_LED_CLOCK, OUTPUT); digitalWrite(PIN_LED_CLOCK, LOW);
+  ledc_timer_config_t timer = {}; timer.speed_mode = LEDC_LOW_SPEED_MODE; timer.duty_resolution = LEDC_TIMER_8_BIT; timer.timer_num = LEDC_TIMER_0; timer.freq_hz = 1000; timer.clk_cfg = LEDC_AUTO_CLK;
+  bool configured = ledc_timer_config(&timer) == ESP_OK;
+  ledc_channel_config_t channel = {}; channel.gpio_num = PIN_LED_DATA; channel.speed_mode = LEDC_LOW_SPEED_MODE; channel.channel = LEDC_CHANNEL_0; channel.timer_sel = LEDC_TIMER_0; channel.duty = 64;
+  bool ok = configured && ledc_channel_config(&channel) == ESP_OK;
+  uint32_t high = 0, count = 0;
+  if (ok) {
+    gpio_input_enable(static_cast<gpio_num_t>(PIN_LED_DATA));
+    int64_t start = esp_timer_get_time();
+    while (esp_timer_get_time() - start < 20000) { high += gpio_get_level(static_cast<gpio_num_t>(PIN_LED_DATA)); ++count; }
+    ok = count && high > count / 10 && high < count / 2;
+  }
+  if (configured) { ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0); ledc_timer_pause(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0); timer.deconfigure = true; ledc_timer_config(&timer); }
+  gpio_reset_pin(static_cast<gpio_num_t>(PIN_LED_DATA));
+  checkpoint("PWM_FEEDBACK", (String(ok ? "PASS" : "FAIL") + "|HIGH_SAMPLES=" + String(high) + "|TOTAL_SAMPLES=" + String(count) + "|1 kHz 25-percent duty; LED clock held low").c_str());
+}
+
+volatile bool pulseReceived = false;
+volatile size_t pulseCount = 0;
+bool IRAM_ATTR onPulseReceived(rmt_channel_handle_t, const rmt_rx_done_event_data_t *event, void *) {
+  pulseCount = event->num_symbols; pulseReceived = true; return false;
+}
+
+void testPulseCapture() {
+  rmt_channel_handle_t tx = nullptr, rx = nullptr; rmt_encoder_handle_t encoder = nullptr;
+  rmt_tx_channel_config_t txConfig = {}; txConfig.gpio_num = static_cast<gpio_num_t>(PIN_LED_DATA); txConfig.clk_src = RMT_CLK_SRC_DEFAULT; txConfig.resolution_hz = 1000000; txConfig.mem_block_symbols = 64; txConfig.trans_queue_depth = 1; txConfig.flags.io_loop_back = true;
+  rmt_rx_channel_config_t rxConfig = {}; rxConfig.gpio_num = static_cast<gpio_num_t>(PIN_LED_DATA); rxConfig.clk_src = RMT_CLK_SRC_DEFAULT; rxConfig.resolution_hz = 1000000; rxConfig.mem_block_symbols = 64; rxConfig.flags.io_loop_back = true;
+  rmt_copy_encoder_config_t copy = {};
+  bool ok = rmt_new_tx_channel(&txConfig, &tx) == ESP_OK && rmt_new_rx_channel(&rxConfig, &rx) == ESP_OK && rmt_new_copy_encoder(&copy, &encoder) == ESP_OK;
+  rmt_symbol_word_t sent[4] = {}, received[64] = {};
+  for (int i = 0; i < 4; ++i) { sent[i].level0 = 1; sent[i].duration0 = 80 + i * 20; sent[i].level1 = 0; sent[i].duration1 = 40 + i * 10; }
+  bool txEnabled = false, rxEnabled = false; pulseReceived = false; pulseCount = 0;
+  if (ok) {
+    rmt_rx_event_callbacks_t callbacks = {}; callbacks.on_recv_done = onPulseReceived;
+    ok = rmt_rx_register_event_callbacks(rx, &callbacks, nullptr) == ESP_OK;
+    txEnabled = rmt_enable(tx) == ESP_OK; rxEnabled = rmt_enable(rx) == ESP_OK; ok &= txEnabled && rxEnabled;
+    rmt_receive_config_t receive = {}; receive.signal_range_min_ns = 1000; receive.signal_range_max_ns = 1000000;
+    rmt_transmit_config_t transmit = {};
+    if (ok) ok = rmt_receive(rx, received, sizeof(received), &receive) == ESP_OK && rmt_transmit(tx, encoder, sent, sizeof(sent), &transmit) == ESP_OK;
+    uint32_t began = millis(); while (ok && !pulseReceived && millis() - began < 2000) delay(1);
+    ok &= pulseReceived && pulseCount >= 2;
+    if (ok) for (int i = 0; i < 2; ++i) ok &= received[i].level0 == sent[i].level0 && received[i].level1 == sent[i].level1 && abs(int(received[i].duration0) - int(sent[i].duration0)) <= 10 && abs(int(received[i].duration1) - int(sent[i].duration1)) <= 10;
+  }
+  if (txEnabled) rmt_disable(tx); if (rxEnabled) rmt_disable(rx);
+  if (encoder) rmt_del_encoder(encoder); if (tx) rmt_del_channel(tx); if (rx) rmt_del_channel(rx);
+  gpio_reset_pin(static_cast<gpio_num_t>(PIN_LED_DATA));
+  checkpoint("RMT_PULSE_CAPTURE", (String(ok ? "PASS" : "FAIL") + "|SYMBOLS=" + String(static_cast<unsigned>(pulseCount)) + "|TX/RX timing feedback; LED clock held low").c_str());
+}
+
+void testInternalPeripherals() {
+  checkpoint("PERIPHERAL_TEST_BEGIN");
+  testUart(UART_NUM_1, "UART1_INTERNAL"); testUart(UART_NUM_2, "UART2_INTERNAL");
+  pinMode(PIN_TFT_CS, OUTPUT); digitalWrite(PIN_TFT_CS, HIGH);
+  testSpi(SPI2_HOST, PIN_TFT_MOSI, PIN_TFT_SCLK, "SPI2_FEEDBACK");
+  testSpi(SPI3_HOST, PIN_LED_DATA, PIN_LED_CLOCK, "SPI3_FEEDBACK");
+  testPwm();
+  testPulseCapture();
+  checkpoint("EXTERNAL_BUS_FIXTURES", "UNVERIFIED|I2C, I2S, CAN and analog reference measurements need an external fixture; unknown expansion nets are not driven");
 }
 
 void testSettingsAndFlash() {
@@ -294,6 +405,7 @@ void setup() {
   appendReport("FTDIAG|" + String(millis()) + "|RESET_REASON|" + String(static_cast<int>(esp_reset_reason())));
   testSystem();
   testCoresAndCrypto();
+  testInternalPeripherals();
   testSettingsAndFlash();
   testScratchFlash();
   checkpoint("BLE_CONTROLLER", btStartMode(BT_MODE_BLE) && btStarted() ? "PASS|Controller initialized" : "FAIL|Controller initialization failed");

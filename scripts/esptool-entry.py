@@ -6,6 +6,9 @@ import esptool
 from esptool.targets.esp32s3 import ESP32S3ROM
 
 def main():
+    if "--flyingthumb-helper-version" in sys.argv:
+        print("FLYINGTHUMB_HELPER_PROTOCOL=2")
+        return
     if "--flyingthumb-boot-reset" not in sys.argv:
         esptool.main()
         return

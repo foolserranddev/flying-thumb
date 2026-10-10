@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
-  <ItemGroup><Compile Include="../../manager/DiagnosticReport.cs" Link="DiagnosticReport.cs" /><Compile Include="../../manager/DiagnosticSession.cs" Link="DiagnosticSession.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="../../manager/DiagnosticReport.cs" Link="DiagnosticReport.cs" /><Compile Include="../../manager/DiagnosticSession.cs" Link="DiagnosticSession.cs" /><Compile Include="../../manager/Models.cs" Link="Models.cs" /><Compile Include="../../manager/FlyingThumbClient.cs" Link="FlyingThumbClient.cs" /></ItemGroup>
 </Project>

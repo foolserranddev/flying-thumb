@@ -8,7 +8,8 @@ namespace FlyingThumbManager;
 public sealed class FlyingThumbClient
 {
     const string DemoMarker = ".flyingthumb-demo.json";
-    readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(90) };
+    readonly HttpClient http;
+    public FlyingThumbClient(HttpClient? transport = null) => http = transport ?? new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
 
     HttpRequestMessage Request(Device d,HttpMethod method,string path,string key,HttpContent? content=null){var request=new HttpRequestMessage(method,new Uri(d.BaseUri,path)){Content=content};if(!string.IsNullOrEmpty(key))request.Headers.TryAddWithoutValidation("X-FlyingThumb-Key",key);return request;}
     public static string NormalizeRemotePath(string name)
@@ -126,6 +127,13 @@ public sealed class FlyingThumbClient
     {
         if(d.IsSimulated)return;
         using var response=await http.SendAsync(Request(d,HttpMethod.Post,"api/restart",key,new StringContent("")));await EnsureSuccessAsync(response,"Restart drive");
+    }
+
+    public async Task EnterUsbRecoveryAsync(Device d, string key)
+    {
+        if (d.IsSimulated) throw new InvalidOperationException("USB recovery requires a physical drive.");
+        using var response = await http.SendAsync(Request(d, HttpMethod.Post, "api/usb-recovery", key, new StringContent("")));
+        await EnsureSuccessAsync(response, "Enter USB recovery");
     }
 
     public async Task RenameAsync(Device d,string name,string key)

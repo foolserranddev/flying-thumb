@@ -64,7 +64,7 @@ try {
         firmwareScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-wifi-update.bin"; sha256 = (Get-FileHash $screenlessWifiImage -Algorithm SHA256).Hash }
         recoveryScreenless = [ordered]@{ version = $firmwareVersion; url = "$base/FlyingThumb-v2-screenless-full.bin"; sha256 = (Get-FileHash $screenlessFullImage -Algorithm SHA256).Hash }
         diagnostic = [ordered]@{ version = $managerVersion; url = "$base/FlyingThumb-v2-hardware-diagnostic.bin"; sha256 = (Get-FileHash $diagnosticImage -Algorithm SHA256).Hash }
-        notes = "Adds active hardware diagnostics for LED GPIO levels and shorts, Wi-Fi radio, microSD, and button state, with automatic restoration of normal firmware."
+        notes = "Adds complete USB hardware diagnostics with verified firmware restoration, authenticated remote USB recovery, optional LCD plus LED output, and corrected physical SD capacity reporting."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$output\latest.json" -Encoding utf8
     Get-ChildItem -LiteralPath $output | Select-Object Name,Length,LastWriteTime

@@ -28,6 +28,11 @@ Results must distinguish PASS, FAIL, SKIP, UNVERIFIED and incomplete execution. 
 | Flash wear/full-capacity | Reserved scratch erase/program/readback, or preserved full-image test | Must reserve scratch explicitly; never overwrite user/NVS/OTA areas |
 | NVS/settings | Read and decode metadata, bounded separate namespace roundtrip | Do not print credentials; avoid mutating customer namespaces |
 | BLE | Controller initialization and remote scan/connect | External peer required for radio proof |
+| AES | AES-128 encrypt/decrypt known vector | Does not certify every cryptographic mode or silicon transistor |
+| UART1/2 | Internal TX/RX FIFO loopback with no GPIO routing | External UART wiring requires a fixture; existing console is preserved |
+| SPI2/3 | MOSI/MISO feedback on known LCD/LED nets | LCD chip select held inactive; no unknown expansion pins driven |
+| PWM/LEDC | 1 kHz 25-percent-duty feedback at LED data pin | LED clock held low; sampling tolerates scheduling jitter |
+| RMT | Timed TX/RX pulse capture at LED data pin | LED clock held low; tests pulse engine rather than an external protocol peer |
 
 Implemented since this inventory: schema-v2 validation; structured results viewer; per-record flash checkpoints; stale-result erase; 120-second deadline task returning to recovery; both-core arithmetic/scheduling; SHA-256 known vector; NVS close/reopen persistence and cleanup; reserved-sector flash roundtrip; BLE controller initialization; SD one-bit/four-bit initialization and raw sector sampling; installed partition-layout validation; exact app0/boot-selection/coredump backups and restoration.
 
@@ -54,6 +59,12 @@ A saved live report proved RAM patterns, both cores, SHA-256, temperature sensin
 Normal firmware 2.5.1 was installed and independently verified on the original board; Windows subsequently mounted it as E:. The temporary tester was removed. The hardware-serial diagnostic and its new return path remain preview-only. A complete run via the Manager with report retrieval and verified restoration is the outstanding runtime requirement; no connected drive is visible at the latest check.
 
 Windows host-side verification subsequently identified E: by USB serial 441BF6ED9278 and passed a 256 KiB temporary-file test with nested directories, exact readback hash, rename and cleanup. Only the unique test folder was removed. Buffered Windows reads may be cached; this is evidence of functional filesystem access, not a raw USB read-speed or exhaustive media certification. The repeatable host script uses write-through plus flush for writes.
+
+The hardware-serial tester returned automatically and produced a complete report with FAT geometry passing. The Manager's own unattended entry point then completed the same workflow: no failures in the completed checks, original application/boot/crash-report storage restored and independently verified, and normal firmware restarted. Evidence is retained at `work/native-transport-live-test/manager-report-quiet.txt`. The Manager deliberately waits for the bounded tester before probing recovery, avoiding line-state interference during execution.
+
+Manager 1.1.9 adds compatible-helper detection/download, reports firmware-reference differences separately from hardware failures, and exposes authenticated network recovery. Firmware 2.5.2 includes the network hook and keeps LCD-plus-LED output on all drives. Client tests verify the recovery endpoint, key header, busy refusal and authentication rejection. Full network-hook execution additionally requires the drive to be reachable on Wi-Fi with a configured shop key.
+
+The expanded packaged run passed AES, UART1/2 and RMT pulse capture. SPI/PWM feedback initially failed because the test called `gpio_set_direction` after peripheral setup, replacing the peripheral output routing with ordinary GPIO. Espressif's driver explicitly performs that replacement (https://raw.githubusercontent.com/espressif/esp-idf/v5.5/components/esp_driver_gpio/src/gpio.c). SPI now reconnects its output/input signals and PWM enables only the input buffer. The corrected tester compiles; these three corrected feedback checks still need a live rerun before publication. The Manager restored and verified normal firmware 2.5.2 after the failed prerelease checks.
 
 Implemented source and build verification do not prove hardware operation. The Manager build passes, diagnostic firmware builds pass, and fault tests cover malformed/incomplete reports, identity extraction, layout rejection and modified backups. Internal die-temperature sensing is included. Live execution and automatic recovery/restoration remain unverified. No expanded diagnostic release has been published.
 
