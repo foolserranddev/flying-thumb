@@ -13,6 +13,23 @@ public sealed class MainForm : Form
     readonly FlyingThumbClient client = new();
     readonly DataGridView deviceGrid = new();
     readonly DataGridView fileGrid = new();
+    readonly HashSet<string> expandedFolders = new(StringComparer.OrdinalIgnoreCase);
+    string[] browserFilePaths = [];
+    static BrowserEntry? BrowserRow(DataGridViewRow row) => row.Tag as BrowserEntry;
+    internal void RenderBrowserPreview(string output)
+    {
+        devices.Clear();
+        foreach(var name in new[] { "Cutting Table", "Embroidery", "Long Arm" }) {
+            var device = new Device { Id=name,Name=name,IsSimulated=true,StorageReady=true,Firmware="Preview" };
+            devices.Add(device);
+            inventories[name] = [new() { Name="Patterns/Flowers/Rose.pes",Type="file",Size=72048 },new() { Name="Patterns/Flowers/Tulip.pes",Type="file",Size=121088 },new() { Name="Patterns/Stars/Feathered Star.pes",Type="file",Size=96128 },new() { Name="Shop notes.txt",Type="file",Size=2048 }];
+        }
+        expandedFolders.UnionWith(["Patterns","Patterns/Flowers"]);
+        RenderFileMatrix(); ApplyResponsiveSplit();
+        using var bitmap = new Bitmap(Width,Height);
+        DrawToBitmap(bitmap,new Rectangle(Point.Empty,Size));
+        bitmap.Save(output,System.Drawing.Imaging.ImageFormat.Png);
+    }
 
     readonly TextBox log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
     readonly ToolStripStatusLabel summary = new("Ready");
@@ -350,7 +367,7 @@ public sealed class MainForm : Form
         fileGrid.CellValueChanged += (_, e) =>
         {
             if (renderingFileMatrix || e.RowIndex < 0 || e.ColumnIndex < 0 || e.ColumnIndex >= fileGrid.Columns.Count || fileGrid.Columns[e.ColumnIndex].Name != "FileChecked") return;
-            var row = fileGrid.Rows[e.RowIndex]; var name = row.Cells["FileName"].Value?.ToString(); if (string.IsNullOrWhiteSpace(name)) return;
+            var row = fileGrid.Rows[e.RowIndex]; var entry = BrowserRow(row); if (entry is null || entry.IsFolder) return; var name = entry.Path;
             if (row.Cells["FileChecked"].Value is true) checkedFiles.Add(name); else checkedFiles.Remove(name);
             UpdateFileCheckHeader();
             UpdateFileActionButtons();
@@ -359,6 +376,62 @@ public sealed class MainForm : Form
         fileGrid.CellMouseDown += (_, e) => { if (e.Button == MouseButtons.Right && e.RowIndex >= 0) { if (checkedFiles.Count == 0 && !fileGrid.Rows[e.RowIndex].Selected) { fileGrid.ClearSelection(); fileGrid.Rows[e.RowIndex].Selected = true; } fileGrid.CurrentCell = fileGrid.Rows[e.RowIndex].Cells["FileName"]; } };
         fileGrid.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Delete && !busy) { e.Handled = true; e.SuppressKeyPress = true; await DeleteSelectedFiles(); } };
         fileGrid.SelectionChanged += (_, _) => UpdateFileActionButtons();
+        fileGrid.CellPainting += PaintBrowserName;
+        fileGrid.CellMouseClick += (_, e) => {
+            if (busy || e.RowIndex < 0 || e.ColumnIndex != fileGrid.Columns["FileName"]?.Index || e.Button != MouseButtons.Left) return;
+            var entry = BrowserRow(fileGrid.Rows[e.RowIndex]);
+            if (entry?.IsFolder == true && e.X < (entry.Depth * 22 + 28) * DeviceDpi / 96f) ToggleFolder(entry.Path);
+        };
+        fileGrid.CellDoubleClick += (_, e) => { if(e.RowIndex >= 0 && BrowserRow(fileGrid.Rows[e.RowIndex]) is { IsFolder:true } folder) ToggleFolder(folder.Path); };
+        fileGrid.KeyDown += (_, e) => {
+            if(busy || fileGrid.CurrentRow is not { } row || BrowserRow(row) is not { IsFolder:true } folder) return;
+            if(e.KeyCode == Keys.Right && !expandedFolders.Contains(folder.Path) || e.KeyCode == Keys.Left && expandedFolders.Contains(folder.Path)) { e.Handled=true; e.SuppressKeyPress=true; ToggleFolder(folder.Path); }
+        };
+        fileGrid.AllowDrop = true;
+        fileGrid.DragOver += (_, e) => {
+            e.Effect = !busy && e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
+            var point = fileGrid.PointToClient(new Point(e.X,e.Y)); var hit = fileGrid.HitTest(point.X,point.Y);
+            var entry = hit.RowIndex >= 0 ? BrowserRow(fileGrid.Rows[hit.RowIndex]) : null;
+            summary.Text = "Drop into /" + (entry?.IsFolder == true ? entry.Path : entry?.Path.Contains('/') == true ? entry.Path[..entry.Path.LastIndexOf('/')] : "");
+        };
+        fileGrid.DragDrop += async (_, e) => {
+            if(busy || e.Data?.GetData(DataFormats.FileDrop) is not string[] paths) return;
+            var point = fileGrid.PointToClient(new Point(e.X,e.Y)); var hit = fileGrid.HitTest(point.X,point.Y);
+            var entry = hit.RowIndex >= 0 ? BrowserRow(fileGrid.Rows[hit.RowIndex]) : null;
+            var destination = entry?.IsFolder == true ? entry.Path : entry?.Path.Contains('/') == true ? entry.Path[..entry.Path.LastIndexOf('/')] : "";
+            if(destination.Length > 0) expandedFolders.Add(destination);
+            await AddPaths(paths,destination);
+        };
+    }
+
+    void ToggleFolder(string path) { if (!expandedFolders.Remove(path)) expandedFolders.Add(path); RenderFileMatrix(); }
+    void PaintBrowserName(object? sender, DataGridViewCellPaintingEventArgs e)
+    {
+        if(e.RowIndex < 0 || e.ColumnIndex != fileGrid.Columns["FileName"]?.Index || BrowserRow(fileGrid.Rows[e.RowIndex]) is not { } entry) return;
+        e.PaintBackground(e.ClipBounds,true);
+        var scale = DeviceDpi / 96f;
+        var originX = e.CellBounds.Left + (int)((8 + entry.Depth * 22)*scale);
+        var originY = e.CellBounds.Top + (e.CellBounds.Height - (int)(16*scale))/2;
+        var drawingState = e.Graphics!.Save();
+        e.Graphics.TranslateTransform(originX,originY); e.Graphics.ScaleTransform(scale,scale);
+        var x = 0; var y = 0;
+        if(entry.IsFolder) {
+            using var outline = new Pen(Color.FromArgb(110,120,130));
+            e.Graphics!.DrawRectangle(outline,x,y+2,12,12); e.Graphics.DrawLine(outline,x+3,y+8,x+9,y+8);
+            if(!expandedFolders.Contains(entry.Path)) e.Graphics.DrawLine(outline,x+6,y+5,x+6,y+11);
+            using var yellow = new SolidBrush(Color.FromArgb(244,190,62));
+            e.Graphics.FillRectangle(yellow,x+21,y+4,19,12); e.Graphics.FillRectangle(yellow,x+21,y+1,9,5);
+        } else {
+            using var white = new SolidBrush(Color.FromArgb(245,248,252)); using var outline = new Pen(Color.SlateGray);
+            e.Graphics!.FillRectangle(white,x+23,y,13,16); e.Graphics.DrawRectangle(outline,x+23,y,13,16);
+            e.Graphics.DrawLine(outline,x+26,y+6,x+33,y+6); e.Graphics.DrawLine(outline,x+26,y+10,x+33,y+10);
+        }
+        e.Graphics.Restore(drawingState);
+        var textLeft = originX + (int)(48*scale);
+        var textBounds = new Rectangle(textLeft,e.CellBounds.Top,Math.Max(0,e.CellBounds.Right-textLeft-4),e.CellBounds.Height);
+        var style = e.CellStyle ?? fileGrid.DefaultCellStyle;
+        TextRenderer.DrawText(e.Graphics!,entry.Name,style.Font ?? Font,textBounds,(e.State & DataGridViewElementStates.Selected)!=0 ? style.SelectionForeColor : style.ForeColor,TextFormatFlags.VerticalCenter|TextFormatFlags.EndEllipsis|TextFormatFlags.NoPrefix);
+        e.Handled = true;
     }
 
     static bool FirmwareAtLeast(Device device, int major, int minor, int build)
@@ -430,15 +503,13 @@ public sealed class MainForm : Form
     string[] CheckedFileNames()
     {
         fileGrid.EndEdit();
-        return fileGrid.Rows.Cast<DataGridViewRow>().Where(row => row.Cells["FileChecked"].Value is true)
-            .Select(row => row.Cells["FileName"].Value?.ToString()).Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => FlyingThumbClient.NormalizeRemotePath(name!)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return checkedFiles.ToArray();
     }
     string[] ChosenFileNames()
     {
         var checkedNames = CheckedFileNames();
         if (checkedNames.Length > 0) return checkedNames;
-        return fileGrid.SelectedRows.Cast<DataGridViewRow>().Select(row => row.Cells["FileName"].Value?.ToString())
+        return fileGrid.SelectedRows.Cast<DataGridViewRow>().Select(row => BrowserRow(row)).Where(entry => entry is { IsFolder:false }).Select(entry => entry!.Path)
             .Where(name => !string.IsNullOrWhiteSpace(name)).Select(name => FlyingThumbClient.NormalizeRemotePath(name!))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
@@ -446,13 +517,11 @@ public sealed class MainForm : Form
     {
         if (busy || fileGrid.Rows.Count == 0) return;
         var checkAll = fileCheckHeader?.HeaderCheckState != CheckState.Checked;
+        checkedFiles.Clear(); if(checkAll) checkedFiles.UnionWith(browserFilePaths);
         renderingFileMatrix = true;
         foreach (DataGridViewRow row in fileGrid.Rows)
         {
-            row.Cells["FileChecked"].Value = checkAll;
-            var name = row.Cells["FileName"].Value?.ToString();
-            if (string.IsNullOrWhiteSpace(name)) continue;
-            if (checkAll) checkedFiles.Add(name); else checkedFiles.Remove(name);
+            if(BrowserRow(row) is { IsFolder:false } entry) row.Cells["FileChecked"].Value = checkedFiles.Contains(entry.Path);
         }
         renderingFileMatrix = false;
         UpdateFileCheckHeader();
@@ -463,13 +532,13 @@ public sealed class MainForm : Form
     void UpdateFileCheckHeader()
     {
         if (fileCheckHeader is null) return;
-        var total = fileGrid.Rows.Count;
-        var selected = fileGrid.Rows.Cast<DataGridViewRow>().Count(row => row.Cells["FileChecked"].Value is true);
+        var total = browserFilePaths.Length;
+        var selected = checkedFiles.Count;
         fileCheckHeader.SetState(selected == 0 ? CheckState.Unchecked : selected == total ? CheckState.Checked : CheckState.Indeterminate);
     }
     void UpdateFileActionButtons()
     {
-        deleteFilesButton.Enabled = !busy && (checkedFiles.Count > 0 || fileGrid.SelectedRows.Count > 0);
+        deleteFilesButton.Enabled = !busy && (checkedFiles.Count > 0 || fileGrid.SelectedRows.Cast<DataGridViewRow>().Any(row => BrowserRow(row) is { IsFolder:false }));
     }
     void SelectAll(bool selected) { foreach (var d in devices) d.Selected = selected; deviceGrid.Refresh(); RenderFileMatrix(); }
     void WriteLog(string message) { if (InvokeRequired) { BeginInvoke(() => WriteLog(message)); return; } var line = $"{DateTime.Now:O}  {message}{Environment.NewLine}"; log.AppendText(line); try { Directory.CreateDirectory(Path.GetDirectoryName(sessionLogPath)!); File.AppendAllText(sessionLogPath,line); } catch { } }
@@ -626,8 +695,12 @@ public sealed class MainForm : Form
     void RenderFileMatrix()
     {
         var shown = devices.Where(d => d.Selected).ToArray();
+        var selectedPath = fileGrid.CurrentRow is { } current ? BrowserRow(current)?.Path : null;
+        var firstVisible = Math.Max(0,fileGrid.FirstDisplayedScrollingRowIndex);
         var names = shown.Where(d => inventories.ContainsKey(d.Id)).SelectMany(d => inventories[d.Id]).Where(x => x.Type == "file").Select(x => FlyingThumbClient.NormalizeRemotePath(x.Name)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray();
         checkedFiles.IntersectWith(names);
+        browserFilePaths = names;
+        var directories = shown.Where(d => inventories.ContainsKey(d.Id)).SelectMany(d => inventories[d.Id]).Where(f => f.Type is "directory" or "dir" or "folder").Select(f => f.Name);
         renderingFileMatrix = true;
         fileGrid.SuspendLayout();
         fileGrid.Columns.Clear();
@@ -635,25 +708,41 @@ public sealed class MainForm : Form
         fileCheckHeader = new CheckBoxHeaderCell { ToolTipText = "Check or uncheck all files" };
         fileCheckHeader.ToggleRequested += (_, _) => ToggleAllFiles();
         fileGrid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "FileChecked", HeaderText = "", HeaderCell = fileCheckHeader, ReadOnly = false, Width = 46, MinimumWidth = 46, AutoSizeMode = DataGridViewAutoSizeColumnMode.None, SortMode = DataGridViewColumnSortMode.NotSortable });
-        fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FileName", HeaderText = "File", ReadOnly = true, FillWeight = 150 });
+        fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "FileName", HeaderText = "Name", ReadOnly = true, FillWeight = 150, MinimumWidth = 220, SortMode = DataGridViewColumnSortMode.NotSortable });
         fileGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Overall", HeaderText = "Overall", ReadOnly = true, FillWeight = 65 });
         foreach (var d in shown) fileGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = d.Name, ReadOnly = true, FillWeight = 75 });
-        foreach (var name in names)
+        foreach (var entry in FileBrowserTree.Build(names,directories,expandedFolders))
         {
+            var name = entry.Path;
+            if(entry.IsFolder) {
+                var folderCells = new List<object> { false,entry.Name,"Folder" };
+                folderCells.AddRange(shown.Select(d => inventories.TryGetValue(d.Id,out var files) && files.Any(f => f.Name.TrimStart('/').StartsWith(name+"/",StringComparison.OrdinalIgnoreCase) || f.Name.Trim('/').Equals(name,StringComparison.OrdinalIgnoreCase)) ? "Present" : "-"));
+                var folderRow = fileGrid.Rows[fileGrid.Rows.Add(folderCells.ToArray())]; folderRow.Tag = entry;
+                folderRow.Cells["FileChecked"] = new DataGridViewTextBoxCell { Value="" };
+                folderRow.Cells["FileChecked"].ReadOnly = true;
+                continue;
+            }
             var entries = shown.Select(d => inventories.TryGetValue(d.Id, out var files) ? files.FirstOrDefault(f => string.Equals(FlyingThumbClient.NormalizeRemotePath(f.Name), name, StringComparison.OrdinalIgnoreCase)) : null).ToArray();
             var sizes = entries.Where(x => x is not null).Select(x => x!.Size).Distinct().ToArray();
             var state = sizes.Length > 1 ? "CONFLICT" : entries.All(x => x is not null) ? "On every included drive" : $"On {entries.Count(x => x is not null)}/{shown.Length}";
-            var cells = new List<object> { checkedFiles.Contains(name), name, state };
+            var cells = new List<object> { checkedFiles.Contains(name), entry.Name, state };
             cells.AddRange(entries.Select(x => x is null ? "-" : $"Yes - {FormatSize(x.Size)}"));
             var row = fileGrid.Rows[fileGrid.Rows.Add(cells.ToArray())];
+            row.Tag = entry; row.Cells["FileName"].ToolTipText = name;
             if (sizes.Length > 1) row.DefaultCellStyle.BackColor = Color.MistyRose;
         }
         fileGrid.ResumeLayout();
         renderingFileMatrix = false;
+        if(fileGrid.Rows.Count > 0) {
+            fileGrid.ClearSelection();
+            var selectedRow = fileGrid.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => BrowserRow(row)?.Path.Equals(selectedPath,StringComparison.OrdinalIgnoreCase) == true);
+            if(selectedRow is not null) { selectedRow.Selected = true; fileGrid.CurrentCell = selectedRow.Cells["FileName"]; }
+            fileGrid.FirstDisplayedScrollingRowIndex = Math.Min(firstVisible,fileGrid.Rows.Count-1);
+        }
         UpdateFileCheckHeader();
         UpdateFileActionButtons();
         tabs.SelectedIndex = 0;
-        summary.Text = shown.Length == 0 ? "No drives included" : $"Showing {fileGrid.Rows.Count} unique file(s) across {shown.Length} included drive(s)";
+        summary.Text = shown.Length == 0 ? "No drives included" : $"{names.Length} files across {shown.Length} included drives - expand folders or drop files onto a folder";
     }
 
     async Task ChooseAndSync()
@@ -758,9 +847,10 @@ public sealed class MainForm : Form
         return items.GroupBy(item => item.RemotePath, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
     }
 
-    async Task AddPaths(string[] paths)
+    async Task AddPaths(string[] paths, string destination = "")
     {
         var items = ExpandUploadItems(paths);
+        if(destination.Length > 0) items = items.Select(item => item with { RemotePath = destination + "/" + item.RemotePath }).ToArray();
         if (items.Length == 0) { MessageBox.Show(this, "The selected folder contains no files.", "Add Folder", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
         await AddFiles(items);
     }

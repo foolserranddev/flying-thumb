@@ -66,6 +66,17 @@ try {
 } finally { File.Delete(transferTest); if(File.Exists(transferTest+".out"))File.Delete(transferTest+".out"); }
 Console.WriteLine("PASS: upload and download cancellation reach the HTTP operation.");
 
+var expandedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+var browserFiles = new[] { "Patterns/Flowers/Rose.bin", "Patterns/Stars.bin", "README.txt", "patterns/Flowers/Tulip.bin" };
+var collapsed = FileBrowserTree.Build(browserFiles,["Empty folder"],expandedFolders);
+Require(collapsed.Count == 3 && collapsed[0].IsFolder && collapsed[^1].Path == "README.txt", "Root view hides nested files and orders folders first");
+expandedFolders.Add("Patterns"); expandedFolders.Add("Patterns/Flowers");
+var expanded = FileBrowserTree.Build(browserFiles,["Empty folder"],expandedFolders);
+Require(expanded.Count == 7 && expanded.Count(e=>!e.IsFolder)==4,"Expansion reveals all files including mixed-case parent paths");
+Require(expanded.Single(e=>e.Name=="Rose.bin").Depth==2,"Nested indentation reflects hierarchy");
+Require(expanded.Select(e=>e.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count()==expanded.Count,"Folder nodes deduplicate across drives");
+Console.WriteLine("PASS: folder hierarchy, collapse/expansion, mixed-case paths and root-first sorting.");
+
 sealed class CancellationHandler : HttpMessageHandler {
   protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken cancellationToken) {
     await Task.Delay(Timeout.Infinite,cancellationToken);
