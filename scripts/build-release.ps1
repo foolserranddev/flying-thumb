@@ -53,6 +53,9 @@ try {
     Copy-Item -LiteralPath $flasher -Destination "$output\FlyingThumbEsptool.exe" -Force
     "Run FlyingThumbManager.exe. Use Drives > Install / Recover a Drive via USB for first installation, or Help > Check for Updates for existing drives." | Set-Content -LiteralPath "$package\README.txt" -Encoding utf8
     Compress-Archive -Path "$package\*" -DestinationPath "$output\FlyingThumbManager-Windows.zip" -Force
+    & "$PSScriptRoot\build-installer.ps1" -PackageDirectory $package -OutputDirectory $output -Version $managerVersion
+    & npx --yes --package qrcode@1.5.4 qrcode -o "$output\FlyingThumb-Setup-QR.svg" -t svg 'https://github.com/foolserranddev/flying-thumb/releases/latest'
+    if ($LASTEXITCODE -ne 0) { throw "Setup QR generation failed." }
 
     $base = "https://github.com/foolserranddev/flying-thumb/releases/latest/download"
     $manifest = [ordered]@{

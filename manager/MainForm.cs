@@ -2156,10 +2156,13 @@ public sealed class MainForm : Form
         var root = await RecoveryManagerCopy.FindVolumeAsync(mac, TimeSpan.FromSeconds(20));
         if (root is null)
         {
-            if (MessageBox.Show(this, $"Firmware {firmwareVersion} is installed. Reconnect the drive normally with a TF card inserted, then click Retry to copy the Manager.", "Reconnect Flying Thumb", MessageBoxButtons.RetryCancel, MessageBoxIcon.Information) != DialogResult.Retry) return;
+            if (MessageBox.Show(this, $"Firmware {firmwareVersion} is installed. Reconnect the drive normally with a TF card inserted, then click Retry to add the Start Here guide.", "Reconnect Flying Thumb", MessageBoxButtons.RetryCancel, MessageBoxIcon.Information) != DialogResult.Retry) return;
             root = await RecoveryManagerCopy.FindVolumeAsync(mac, TimeSpan.FromSeconds(25));
         }
         if (root is null) throw new IOException("Windows did not mount a writable volume for the recovered drive. Check that its TF card is inserted and recognized.");
+        await RecoveryManagerCopy.WriteStartHereAsync(root, mac);
+        WriteLog($"Start Here guide is on {root}.");
+        if (MessageBox.Show(this, $"Firmware {firmwareVersion} is installed and Start Here.html is on {root}.\n\nAdd the optional offline Manager too? This copies a large executable and can take several minutes. Existing files are kept if you choose No.", "Flying Thumb Ready", MessageBoxButtons.YesNo, MessageBoxIcon.Information, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         var destination = Path.Combine(root, RecoveryManagerCopy.FileName);
         bool existed = File.Exists(destination);
         if (existed && MessageBox.Show(this, $"Replace the existing {RecoveryManagerCopy.FileName} on {root}?\n\nOther files will not be changed.", "Replace Manager on Drive?", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)

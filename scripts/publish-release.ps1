@@ -26,6 +26,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not push tag $Tag." }
 
     $assets = @(
+        "$AssetDirectory/FlyingThumbManager-Setup.exe",
+        "$AssetDirectory/FlyingThumb-Setup-QR.svg",
         "$AssetDirectory/FlyingThumbManager.exe",
         "$AssetDirectory/FlyingThumbEsptool.exe",
         "$AssetDirectory/FlyingThumbManager-Windows.zip",
@@ -45,7 +47,8 @@ try {
         gh release edit $Tag --latest --repo $Repository
     }
     else {
-        gh release create $Tag @assets --title $Tag --generate-notes --latest --repo $Repository
+        $notes = "**Windows customers:** [Download Flying Thumb Manager Setup](https://github.com/$Repository/releases/latest/download/FlyingThumbManager-Setup.exe). For portable or offline use, download FlyingThumbManager-Windows.zip from Assets."
+        gh release create $Tag @assets --title $Tag --notes $notes --generate-notes --latest --repo $Repository
     }
     if ($LASTEXITCODE -ne 0) { throw "Could not publish release $Tag." }
 

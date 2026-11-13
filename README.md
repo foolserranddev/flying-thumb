@@ -18,6 +18,10 @@ Flying Thumb Drive is a Wi-Fi-managed USB drive with removable storage. Version 
 
 ## First installation and USB recovery
 
+On Windows, use [Flying Thumb Manager Setup](https://github.com/foolserranddev/flying-thumb/releases/latest/download/FlyingThumbManager-Setup.exe). It installs the Manager and its recovery tools for your Windows account and adds a Start menu shortcut. The [latest release](https://github.com/foolserranddev/flying-thumb/releases/latest) also offers an offline portable ZIP and a printable setup QR code.
+
+After USB recovery, the Manager adds a small `Start Here.html` download guide to the card. Copying the full offline Manager is optional; declining leaves any old copy untouched.
+
 Run **`FlyingThumbManager.exe`** and choose **Drives > Install / Recover a Drive via USB**. The Manager checks for and verifies the latest recovery firmware before walking through the button-hold insertion, detecting the recovery COM port, and writing the complete image. If its USB installation helper is not beside the executable, the Manager downloads and verifies it automatically. The complete ZIP retains both helpers for offline installation. Its confirmation and activity log state the exact firmware version, image source, and size. Recovery requires no Python, PlatformIO, or VS Code and does not format or erase the microSD card.
 
 Use this same path to recover a dongle locally if a wireless firmware upgrade is interrupted or the installed firmware cannot boot. The separate **`Flash Flying Thumb.cmd`** development script remains available as a backup on a development PC.

@@ -6,6 +6,22 @@ namespace FlyingThumbManager;
 static class RecoveryManagerCopy
 {
     public const string FileName = "FlyingThumbManager.exe";
+    public const string StartHereName = "Start Here.html";
+
+    public static async Task WriteStartHereAsync(string root, string mac)
+    {
+        using var resource = typeof(RecoveryManagerCopy).Assembly.GetManifestResourceStream("FlyingThumbManager.StartHere.html")
+            ?? throw new IOException("The Start Here guide is missing from this Manager build.");
+        var temp = Path.GetTempFileName();
+        try
+        {
+            await using (var output = File.Create(temp)) await resource.CopyToAsync(output);
+            var destination = Path.Combine(root, StartHereName);
+            // Leave a customized or previously supplied guide alone.
+            if (!File.Exists(destination)) await CopyAsync(temp, root, mac, false, StartHereName);
+        }
+        finally { File.Delete(temp); }
+    }
 
     static async Task<string?> MatchVolumeAsync(string mac)
     {
@@ -38,7 +54,7 @@ static class RecoveryManagerCopy
         return null;
     }
 
-    public static async Task CopyAsync(string source, string root, string mac, bool replace)
+    public static async Task CopyAsync(string source, string root, string mac, bool replace, string fileName = FileName)
     {
         async Task VerifyTarget()
         {
@@ -46,7 +62,7 @@ static class RecoveryManagerCopy
                 throw new IOException("The recovered drive disconnected or changed drive letters. No replacement was made.");
         }
         await VerifyTarget();
-        var destination = Path.Combine(root, FileName);
+        var destination = Path.Combine(root, fileName);
         var token = Guid.NewGuid().ToString("N");
         var staging = destination + "." + token + ".tmp";
         var backup = destination + "." + token + ".backup";
