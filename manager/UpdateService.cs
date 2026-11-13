@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Win32;
 
 namespace FlyingThumbManager;
 
@@ -147,6 +148,7 @@ public static class UpdateService
                 }
             }
 
+            RefreshInstalledVersion(destination);
             Process.Start(new ProcessStartInfo(destination)
             {
                 UseShellExecute = true,
@@ -161,6 +163,30 @@ public static class UpdateService
             MessageBox.Show("Flying Thumb Manager could not finish installing its update.\n\n" + ex.Message + "\n\nThe downloaded Manager remains available for manual installation.", "Flying Thumb Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         return true;
+    }
+
+    static void RefreshInstalledVersion(string destination)
+    {
+        // NSIS 1.1.15 registered the executable as DisplayIcon. Match it
+        // exactly so a portable copy never changes the installed app's entry.
+        const string path = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\FlyingThumbManager";
+        try
+        {
+            var executable = Path.GetFullPath(destination);
+            foreach (var view in new[] { RegistryView.Registry32, RegistryView.Registry64 })
+            {
+                using var hive = RegistryKey.OpenBaseKey(RegistryHive.CurrentUser, view);
+                using var entry = hive.OpenSubKey(path, writable: true);
+                if (entry?.GetValue("DisplayIcon") is not string registered ||
+                    !string.Equals(registered, executable, StringComparison.OrdinalIgnoreCase)) continue;
+                entry.SetValue("DisplayVersion", CurrentManagerVersion, RegistryValueKind.String);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // A registry policy must not prevent the successfully updated app from launching.
+            Debug.WriteLine(ex);
+        }
     }
 
     static string? ArgumentValue(string[] args, string name)
