@@ -2156,7 +2156,7 @@ public sealed class MainForm : Form
         var root = await RecoveryManagerCopy.FindVolumeAsync(mac, TimeSpan.FromSeconds(20));
         if (root is null)
         {
-            if (MessageBox.Show(this, $"Firmware {firmwareVersion} is installed. Reconnect the drive normally with a TF card inserted, then click Retry to add the Start Here guide.", "Reconnect Flying Thumb", MessageBoxButtons.RetryCancel, MessageBoxIcon.Information) != DialogResult.Retry) return;
+            if (!Prompt.Continue(this, "Reconnect Flying Thumb", $"Firmware {firmwareVersion} is installed.\n\nReconnect the drive without holding its button. Make sure a TF card is inserted, then click Continue to add the Start Here guide.")) return;
             root = await RecoveryManagerCopy.FindVolumeAsync(mac, TimeSpan.FromSeconds(25));
         }
         if (root is null) throw new IOException("Windows did not mount a writable volume for the recovered drive. Check that its TF card is inserted and recognized.");
@@ -2227,6 +2227,16 @@ sealed class CheckBoxHeaderCell : DataGridViewColumnHeaderCell
 }
 static class Prompt
 {
+    public static bool Continue(IWin32Window owner, string title, string label)
+    {
+        using var form = Dialog(title, new Panel { Visible = false }, label, out var layout);
+        var next = new Button { Text = "Continue", DialogResult = DialogResult.OK };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel };
+        layout.Controls.Add(Buttons(next, cancel), 0, 2);
+        form.AcceptButton = next; form.CancelButton = cancel;
+        return form.ShowDialog(owner) == DialogResult.OK;
+    }
+
     static FlowLayoutPanel Buttons(Button ok, Button cancel)
     {
         var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 10, 0, 0) };
