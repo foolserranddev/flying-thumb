@@ -2088,6 +2088,7 @@ public sealed class MainForm : Form
 
     async void RecoverUsb(object? sender, EventArgs e)
     {
+        if (busy || transferQueueRunning) return;
         var flasher = Path.Combine(AppContext.BaseDirectory, "FlyingThumbEsptool.exe");
         if (!File.Exists(flasher))
         {
@@ -2127,9 +2128,63 @@ public sealed class MainForm : Form
         }
         if (MessageBox.Show($"Install Flying Thumb firmware {recovery.Version} through {port}?\n\nSource: {recovery.Source}\nImage size: {new FileInfo(image).Length:N0} bytes\n\nTF-card files will not be erased.", "Confirm USB recovery", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
         SetBusy(true); tabs.SelectedIndex = 1; WriteLog($"USB recovery started on {port}: installing firmware {recovery.Version} from {recovery.Source} ({new FileInfo(image).Length:N0} bytes).");
-        try { var start = new ProcessStartInfo(flasher) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true }; foreach (var a in new[] { "--chip", "esp32s3", "--port", port, "--baud", "921600", "write_flash", "0x0", image }) start.ArgumentList.Add(a); using var process = new Process { StartInfo = start }; process.OutputDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.ErrorDataReceived += (_, a) => { if (!string.IsNullOrWhiteSpace(a.Data)) WriteLog(a.Data); }; process.Start(); process.BeginOutputReadLine(); process.BeginErrorReadLine(); await process.WaitForExitAsync(); if (process.ExitCode != 0) throw new InvalidOperationException($"Flashing engine returned error {process.ExitCode}."); WriteLog($"USB installation completed successfully: firmware {recovery.Version} installed and verified."); MessageBox.Show($"Firmware {recovery.Version} installed successfully. Reconnect the Flying Thumb Drive normally."); }
+        try
+        {
+            var result = await RunFlasherCommand(flasher, port, "default_reset", "hard_reset", TimeSpan.FromMinutes(3), "--baud", "921600", "write_flash", "0x0", image);
+            foreach (var line in result.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)) WriteLog(line.TrimEnd());
+            if (result.ExitCode != 0) throw new InvalidOperationException(result.Output);
+            WriteLog($"USB installation completed successfully: firmware {recovery.Version} installed and verified.");
+            var mac = DiagnosticReport.ExtractMac(result.Output);
+            try
+            {
+                if (mac is null) throw new InvalidOperationException("The flasher did not report a device identity. No USB files were changed.");
+                await CopyRecoveryManager(mac, recovery.Version);
+            }
+            catch (Exception ex)
+            {
+                WriteLog("Firmware installed; Manager copy not completed: " + ex.Message);
+                MessageBox.Show(this, $"Firmware {recovery.Version} installed successfully, but the Manager was not copied.\n\n{ex.Message}", "Manager Copy Incomplete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
         catch (Exception ex) { WriteLog("USB recovery FAILED - " + ex.Message); MessageBox.Show("USB installation failed. Repeat the button-hold insertion and try again.\n\n" + ex.Message); }
         finally { summary.Text = "USB recovery finished."; SetBusy(false); }
+    }
+
+    async Task CopyRecoveryManager(string mac, string firmwareVersion)
+    {
+        summary.Text = "Waiting for the recovered drive to mount...";
+        var root = await RecoveryManagerCopy.FindVolumeAsync(mac, TimeSpan.FromSeconds(20));
+        if (root is null)
+        {
+            if (MessageBox.Show(this, $"Firmware {firmwareVersion} is installed. Reconnect the drive normally with a TF card inserted, then click Retry to copy the Manager.", "Reconnect Flying Thumb", MessageBoxButtons.RetryCancel, MessageBoxIcon.Information) != DialogResult.Retry) return;
+            root = await RecoveryManagerCopy.FindVolumeAsync(mac, TimeSpan.FromSeconds(25));
+        }
+        if (root is null) throw new IOException("Windows did not mount a writable volume for the recovered drive. Check that its TF card is inserted and recognized.");
+        var destination = Path.Combine(root, RecoveryManagerCopy.FileName);
+        bool existed = File.Exists(destination);
+        if (existed && MessageBox.Show(this, $"Replace the existing {RecoveryManagerCopy.FileName} on {root}?\n\nOther files will not be changed.", "Replace Manager on Drive?", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        { WriteLog("Existing Manager copy left unchanged on " + root); return; }
+
+        var source = Environment.ProcessPath;
+        // A framework-dependent development build's apphost cannot run by itself.
+        bool portable = source is not null && string.IsNullOrEmpty(typeof(UpdateService).Assembly.Location) && Path.GetExtension(source).Equals(".exe", StringComparison.OrdinalIgnoreCase);
+        var version = UpdateService.CurrentManagerVersion;
+        summary.Text = "Checking which Manager version to copy...";
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        UpdateManifest? manifest = null;
+        try { manifest = await UpdateService.GetLatestAsync(deadline.Token); }
+        catch (Exception ex) { WriteLog("Manager release check unavailable: " + ex.Message); }
+        if (manifest is not null && (!portable || UpdateService.IsNewer(manifest.Manager.Version, version)))
+        {
+            summary.Text = $"Downloading Manager {manifest.Manager.Version}...";
+            try { source = await UpdateService.DownloadVerifiedAsync(manifest.Manager, RecoveryManagerCopy.FileName); version = manifest.Manager.Version; portable = true; }
+            catch (Exception ex) when (portable) { WriteLog("Latest Manager download unavailable; using running Manager: " + ex.Message); }
+        }
+        if (!portable || source is null) throw new IOException("No standalone Manager executable is available. Use the packaged Manager or reconnect to the internet.");
+        summary.Text = $"Copying Manager {version} to {root} — do not unplug the drive...";
+        await RecoveryManagerCopy.CopyAsync(source, root, mac, existed);
+        WriteLog($"Manager {version} placed on {destination}.");
+        MessageBox.Show(this, $"Firmware {firmwareVersion} installed successfully.\n\nManager {version} is on {destination}.", "Flying Thumb Ready", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 }
 

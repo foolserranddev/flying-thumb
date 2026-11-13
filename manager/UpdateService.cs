@@ -43,14 +43,14 @@ public static class UpdateService
         catch { }
     }
 
-    public static async Task<UpdateManifest> GetLatestAsync()
+    public static async Task<UpdateManifest> GetLatestAsync(CancellationToken cancellationToken = default)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, ManifestUrl + "?check=" + DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         request.Headers.UserAgent.ParseAdd("FlyingThumbManager/" + CurrentManagerVersion);
-        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         await using var input = await response.Content.ReadAsStreamAsync();
-        var manifest = await JsonSerializer.DeserializeAsync<UpdateManifest>(input, JsonOptions) ?? throw new InvalidOperationException("The update information was empty.");
+        var manifest = await JsonSerializer.DeserializeAsync<UpdateManifest>(input, JsonOptions, cancellationToken) ?? throw new InvalidOperationException("The update information was empty.");
         if (manifest.Schema != 1 || string.IsNullOrWhiteSpace(manifest.Firmware.Version)) throw new InvalidOperationException("The update information was not recognized.");
         return manifest;
     }
